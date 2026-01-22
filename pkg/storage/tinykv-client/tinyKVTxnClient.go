@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TinyKVTxnClient 事务工厂
+// TinyKVTxnClient factory of the txn
 type TinyKVTxnClient struct {
 	client tinykvpb.TinyKvClient
 }
@@ -17,7 +17,7 @@ func NewTinyKVTxnClient(client tinykvpb.TinyKvClient) *TinyKVTxnClient {
 
 func (c *TinyKVTxnClient) Close() error { return nil }
 
-// Begin  生产一个 TinyKVTxn
+// Begin  generate TinyKVTxn
 func (c *TinyKVTxnClient) Begin() (storage.Transaction, error) {
 	startTS := uint64(time.Now().UnixNano())
 	return NewTinyKVTxn(c.client, startTS), nil

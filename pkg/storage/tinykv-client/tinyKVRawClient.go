@@ -22,7 +22,7 @@ func (c *TinyKVRawClient) Close() error { return nil }
 
 func (c *TinyKVRawClient) getStartTS() uint64 { return uint64(time.Now().UnixNano()) }
 
-// Put 自动开启事务并提交
+// Put start a new txn and commit
 func (c *TinyKVRawClient) Put(key, val []byte) error {
 	txn := NewTinyKVTxn(c.client, c.getStartTS())
 	if err := txn.Put(key, val); err != nil {
@@ -31,13 +31,13 @@ func (c *TinyKVRawClient) Put(key, val []byte) error {
 	return txn.Commit(context.Background())
 }
 
-// Get 自动开启事务读取
+// Get start a txn to get
 func (c *TinyKVRawClient) Get(key []byte) ([]byte, error) {
 	txn := NewTinyKVTxn(c.client, c.getStartTS())
 	return txn.Get(key)
 }
 
-// Delete
+// Delete delete
 func (c *TinyKVRawClient) Delete(key []byte) error {
 	txn := NewTinyKVTxn(c.client, c.getStartTS())
 	if err := txn.Delete(key); err != nil {
@@ -46,7 +46,7 @@ func (c *TinyKVRawClient) Delete(key []byte) error {
 	return txn.Commit(context.Background())
 }
 
-// PrefixList
+// PrefixList get list  by prefix
 func (c *TinyKVRawClient) PrefixList(prefix []byte) ([][]byte, error) {
 	pairs, err := c.Scan(prefix)
 	if err != nil {

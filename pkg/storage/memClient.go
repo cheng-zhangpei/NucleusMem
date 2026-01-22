@@ -19,8 +19,7 @@ func NewMemClient(addr string) (*MemClient, error) {
 	}
 
 	pbClient := tinykvpb.NewTinyKvClient(conn)
-
-	// 这里调用的是 Factory 的构造函数
+	// call the factory
 	rawClient := tinykv_client.NewTinyKVRawClient(pbClient)
 	txnClient := tinykv_client.NewTinyKVTxnClient(pbClient)
 
