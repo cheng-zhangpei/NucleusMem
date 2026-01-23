@@ -1,6 +1,9 @@
 package storage
 
-import "context"
+import (
+	"context"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
+)
 
 type DBClient interface {
 	Get(key []byte) ([]byte, error)
@@ -23,7 +26,7 @@ type Transaction interface {
 	Put(key, val []byte) error
 	Delete(key []byte) error
 	Commit(ctx context.Context) error
-	Rollback() error
+	Rollback(ctx context.Context, mutations []*kvrpcpb.Mutation) error
 }
 
 type KVPair struct {

@@ -12,10 +12,11 @@ import (
 
 type TinyKVRawClient struct {
 	client tinykvpb.TinyKvClient
+	pdAddr string
 }
 
-func NewTinyKVRawClient(client tinykvpb.TinyKvClient) *TinyKVRawClient {
-	return &TinyKVRawClient{client: client}
+func NewTinyKVRawClient(client tinykvpb.TinyKvClient, pdAddr string) *TinyKVRawClient {
+	return &TinyKVRawClient{client: client, pdAddr: pdAddr}
 }
 
 func (c *TinyKVRawClient) Close() error { return nil }
@@ -24,7 +25,7 @@ func (c *TinyKVRawClient) getStartTS() uint64 { return uint64(time.Now().UnixNan
 
 // Put start a new txn and commit
 func (c *TinyKVRawClient) Put(key, val []byte) error {
-	txn := NewTinyKVTxn(c.client, c.getStartTS())
+	txn := NewTinyKVTxn(c.client, c.getStartTS(), c.pdAddr)
 	if err := txn.Put(key, val); err != nil {
 		return err
 	}
@@ -33,13 +34,13 @@ func (c *TinyKVRawClient) Put(key, val []byte) error {
 
 // Get start a txn to get
 func (c *TinyKVRawClient) Get(key []byte) ([]byte, error) {
-	txn := NewTinyKVTxn(c.client, c.getStartTS())
+	txn := NewTinyKVTxn(c.client, c.getStartTS(), c.pdAddr)
 	return txn.Get(key)
 }
 
 // Delete delete
 func (c *TinyKVRawClient) Delete(key []byte) error {
-	txn := NewTinyKVTxn(c.client, c.getStartTS())
+	txn := NewTinyKVTxn(c.client, c.getStartTS(), c.pdAddr)
 	if err := txn.Delete(key); err != nil {
 		return err
 	}
