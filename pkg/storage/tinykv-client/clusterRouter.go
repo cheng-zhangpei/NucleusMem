@@ -54,14 +54,9 @@ func (c *ClusterClient) getConn(addr string) (tinykvpb.TinyKvClient, error) {
 
 // SendRequest Generic Send Function (with Retry)
 // The req parameter is interface{} because it could be Get/Scan/PreWrite/Commit
-func (c *ClusterClient) SendRequest(ctx context.Context, key []byte, req interface{}) (interface{}, error) {
+func (c *ClusterClient) SendRequest(ctx context.Context, addr string, regionInfo *RegionInfo, representKey []byte, req interface{}) (interface{}, error) {
 	for {
 		// 1. locate the key in region
-		regionInfo, addr, err := c.regionCache.LocateRegion(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-
 		// 2. get conn by addr
 		client, err := c.getConn(addr)
 		if err != nil {
@@ -90,6 +85,69 @@ func (c *ClusterClient) SendRequest(ctx context.Context, key []byte, req interfa
 			}
 			regionErr = getResp.RegionError
 			resp = getResp
+		case *kvrpcpb.PrewriteRequest:
+			// 填充 Context (Region/Epoch/Peer)
+			r.Context = &kvrpcpb.Context{
+				RegionId:    regionInfo.Region.Id,
+				RegionEpoch: regionInfo.Region.RegionEpoch,
+				Peer:        regionInfo.Leader,
+			}
+			preResp, err := client.KvPrewrite(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+			regionErr = preResp.RegionError
+			resp = preResp
+		case *kvrpcpb.CommitRequest:
+			r.Context = &kvrpcpb.Context{
+				RegionId:    regionInfo.Region.Id,
+				RegionEpoch: regionInfo.Region.RegionEpoch,
+				Peer:        regionInfo.Leader,
+			}
+			cmResp, err := client.KvCommit(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+			regionErr = cmResp.RegionError
+			resp = cmResp
+		case *kvrpcpb.BatchRollbackRequest:
+			r.Context = &kvrpcpb.Context{
+				RegionId:    regionInfo.Region.Id,
+				RegionEpoch: regionInfo.Region.RegionEpoch,
+				Peer:        regionInfo.Leader,
+			}
+			rbResp, err := client.KvBatchRollback(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+			regionErr = rbResp.RegionError
+			resp = rbResp
+		case *kvrpcpb.CheckTxnStatusRequest:
+			r.Context = &kvrpcpb.Context{
+				RegionId:    regionInfo.Region.Id,
+				RegionEpoch: regionInfo.Region.RegionEpoch,
+				Peer:        regionInfo.Leader,
+			}
+			checkResp, err := client.KvCheckTxnStatus(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+			regionErr = checkResp.RegionError
+			resp = checkResp
+
+		case *kvrpcpb.ResolveLockRequest:
+			r.Context = &kvrpcpb.Context{
+				RegionId:    regionInfo.Region.Id,
+				RegionEpoch: regionInfo.Region.RegionEpoch,
+				Peer:        regionInfo.Leader,
+			}
+			resolveResp, err := client.KvResolveLock(ctx, r)
+			if err != nil {
+				return nil, err
+			}
+			regionErr = resolveResp.RegionError
+			resp = resolveResp
+
 		}
 		// 4. error handle
 		if regionErr != nil {
@@ -99,13 +157,13 @@ func (c *ClusterClient) SendRequest(ctx context.Context, key []byte, req interfa
 					c.regionCache.UpdateLeader(regionInfo.Region.Id, regionErr.NotLeader.Leader)
 				} else {
 					// Leader unknown,we should clear the cache and check in PD
-					c.regionCache.InvalidateCache(key)
+					c.regionCache.InvalidateCache(representKey)
 				}
 				continue
 			}
 			// EpochNotMatch / RegionNotFound -> Invalidate Cache -> Retry
 			if regionErr.EpochNotMatch != nil || regionErr.RegionNotFound != nil {
-				c.regionCache.InvalidateCache(key)
+				c.regionCache.InvalidateCache(representKey)
 				continue
 			}
 			return nil, fmt.Errorf("region error: %v", regionErr)
