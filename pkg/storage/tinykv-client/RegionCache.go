@@ -24,14 +24,25 @@ type RegionCache struct {
 	regions []*RegionInfo
 	// storeAddrs save StoreID -> Address
 	storeAddrs map[uint64]string
+	clusterID  uint64
 }
 
-func NewRegionCache(pdClient schedulerpb.SchedulerClient) *RegionCache {
+func NewRegionCache(pdClient schedulerpb.SchedulerClient) (*RegionCache, error) {
+	req := &schedulerpb.GetMembersRequest{
+		Header: &schedulerpb.RequestHeader{ClusterId: 0},
+	}
+	resp, err := pdClient.GetMembers(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterID := resp.GetHeader().GetClusterId()
 	return &RegionCache{
 		pdClient:   pdClient,
 		regions:    make([]*RegionInfo, 0),
 		storeAddrs: make(map[uint64]string),
-	}
+		clusterID:  clusterID,
+	}, nil
 }
 
 // LocateRegion core：give Key，find the addr of  Region and Leader 的地址
@@ -82,7 +93,11 @@ func (c *RegionCache) LocateRegion(ctx context.Context, key []byte) (*RegionInfo
 
 // load Region from PD
 func (c *RegionCache) loadRegionFromPD(ctx context.Context, key []byte) (*RegionInfo, error) {
+
 	req := &schedulerpb.GetRegionRequest{
+		Header: &schedulerpb.RequestHeader{
+			ClusterId: c.clusterID,
+		},
 		RegionKey: key,
 	}
 	resp, err := c.pdClient.GetRegion(ctx, req)
@@ -140,7 +155,9 @@ func (c *RegionCache) getStoreAddr(ctx context.Context, storeID uint64) (string,
 	}
 
 	// Cache Miss，ask PD
-	resp, err := c.pdClient.GetStore(ctx, &schedulerpb.GetStoreRequest{StoreId: storeID})
+	resp, err := c.pdClient.GetStore(ctx, &schedulerpb.GetStoreRequest{
+		Header:  &schedulerpb.RequestHeader{ClusterId: c.clusterID},
+		StoreId: storeID})
 	if err != nil {
 		return "", err
 	}

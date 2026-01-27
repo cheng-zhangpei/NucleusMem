@@ -90,6 +90,8 @@ As a teaching project under PingCap's talent program, TinyKV does not provide a 
 
 ### 2.2 architecture
 
+![client](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/arch-of-client.md)
+
 
 
 ## 3.Futrue

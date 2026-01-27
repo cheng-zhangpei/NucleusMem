@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/errorpb"
 	"sync"
+	"time"
 
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
@@ -28,10 +29,13 @@ func NewClusterClient(pdAddr string) (*ClusterClient, error) {
 		return nil, err
 	}
 	pdClient := schedulerpb.NewSchedulerClient(conn)
-
+	regionCache, err := NewRegionCache(pdClient)
+	if err != nil {
+		return nil, err
+	}
 	return &ClusterClient{
 		pdClient:    pdClient,
-		regionCache: NewRegionCache(pdClient),
+		regionCache: regionCache,
 		conns:       make(map[string]*grpc.ClientConn),
 	}, nil
 }
@@ -44,9 +48,12 @@ func (c *ClusterClient) getConn(addr string) (tinykvpb.TinyKvClient, error) {
 		return tinykvpb.NewTinyKvClient(conn), nil
 	}
 
-	conn, err := grpc.Dial(addr, grpc.WithInsecure())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, addr, grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to dial %s: %v", addr, err)
 	}
 	c.conns[addr] = conn
 	return tinykvpb.NewTinyKvClient(conn), nil
@@ -92,6 +99,7 @@ func (c *ClusterClient) SendRequest(ctx context.Context, addr string, regionInfo
 				RegionEpoch: regionInfo.Region.RegionEpoch,
 				Peer:        regionInfo.Leader,
 			}
+			fmt.Println("Sending Prewrite...")
 			preResp, err := client.KvPrewrite(ctx, r)
 			if err != nil {
 				return nil, err

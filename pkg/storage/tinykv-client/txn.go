@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/errorpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
 	"time"
 )
 
@@ -16,7 +15,6 @@ import (
 
 // TinyKVTxn the txn of the tinyKV
 type TinyKVTxn struct {
-	client        tinykvpb.TinyKvClient
 	startTS       uint64
 	puts          map[string][]byte
 	deletes       map[string]bool
@@ -29,14 +27,13 @@ type GroupedMutations struct {
 	Mutations  []*kvrpcpb.Mutation
 }
 
-func NewTinyKVTxn(client tinykvpb.TinyKvClient, startTS uint64, pdAddr string) *TinyKVTxn {
+func NewTinyKVTxn(startTS uint64, pdAddr string) *TinyKVTxn {
 	// init the cluster router
 	clusterClient, err := NewClusterClient(pdAddr)
 	if err != nil {
 		panic(err)
 	}
 	return &TinyKVTxn{
-		client:        client,
 		startTS:       startTS,
 		puts:          make(map[string][]byte),
 		deletes:       make(map[string]bool),
@@ -70,24 +67,85 @@ func (txn *TinyKVTxn) Get(key []byte) ([]byte, error) {
 	if txn.deletes[string(key)] {
 		return nil, nil
 	}
-	// todo(cheng) need retry and refresh region cache
-	_, addr, err := txn.clusterClient.regionCache.LocateRegion(context.Background(), key)
+	regionInfo, addr, err := txn.clusterClient.regionCache.LocateRegion(context.Background(), key)
 	if err != nil {
 		return nil, err
 	}
-	client, err := txn.clusterClient.getConn(addr)
+	req := &kvrpcpb.GetRequest{
+		Key:     key,
+		Version: txn.startTS,
+	}
+	// sendRequest
+	respInterface, err := txn.clusterClient.SendRequest(context.Background(), addr, regionInfo, key, req)
 	if err != nil {
 		return nil, err
 	}
 
-	req := &kvrpcpb.GetRequest{Key: key, Version: txn.startTS}
+	// handle get Response
+	getResp := respInterface.(*kvrpcpb.GetResponse)
+	if err := txn.handleGetResponse(context.Background(), getResp, nil); err != nil {
+		return nil, err
+	}
 
-	resp, err := client.KvGet(context.Background(), req)
+	return getResp.Value, nil
+}
 
+func (txn *TinyKVTxn) Scan(prefix []byte) ([]storage.KVPair, error) {
+	ctx := context.Background()
+	// 1. Construct the scan request
+	req := &kvrpcpb.ScanRequest{
+		StartKey: prefix,
+		Limit:    10000,
+		Version:  txn.startTS,
+	}
+
+	// 2. Locate the region containing the prefix (use prefix as the routing key)
+	// todo(cheng) the method here only support debug mode, we need to write another location method to handle here
+	// todo(cheng) I just use the first region to be the target
+
+	txn.clusterClient.regionCache.mu.RLock()
+	var regionInfo *RegionInfo
+	var addr string
+	if len(txn.clusterClient.regionCache.regions) > 0 {
+		regionInfo = txn.clusterClient.regionCache.regions[0]
+		storeID := regionInfo.Region.Peers[0].StoreId
+		addr = txn.clusterClient.regionCache.storeAddrs[storeID]
+	}
+	txn.clusterClient.regionCache.mu.RUnlock()
+	if regionInfo == nil {
+		regionInfo, addr, _ = txn.clusterClient.regionCache.LocateRegion(ctx, prefix)
+	}
+
+	// 3. Send the request
+	// SendRequest returns an interface{}, so we must type-assert it
+	respInterface, err := txn.clusterClient.SendRequest(ctx, addr, regionInfo, prefix, req)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Value, nil
+
+	resp := respInterface.(*kvrpcpb.ScanResponse)
+
+	// 4. Process the response
+	var pairs []storage.KVPair
+	for _, p := range resp.Pairs {
+		// If there's a key error (e.g., locked), handle it appropriately
+		// For simplicity, skip this KV pair if an error exists (or you could return an error)
+		if p.Error != nil {
+			// Advanced: if p.Error.Locked != nil, you should attempt to resolve the lock.
+			// For now, in a basic Scan implementation, we just skip the problematic entry.
+			continue
+		}
+
+		// Stop scanning once we encounter a key that doesn't match the prefix
+		// (since keys are sorted, all subsequent keys will also not match)
+		if !bytes.HasPrefix(p.Key, prefix) {
+			break
+		}
+
+		pairs = append(pairs, storage.KVPair{Key: p.Key, Value: p.Value})
+	}
+
+	return pairs, nil
 }
 
 // Commit execute the 2PC process
@@ -95,9 +153,8 @@ func (txn *TinyKVTxn) Get(key []byte) ([]byte, error) {
 // 1、preWrite all the key
 // 2、commit primary key —— means the transaction is committed
 // 3、commit all secondary key —— this step allow error occur(async)
-
 func (t *TinyKVTxn) Commit(ctx context.Context) error {
-	// 1. Construct Mutations (all operations)
+	// 1. Construct mutations from pending puts and deletes
 	var mutations []*kvrpcpb.Mutation
 	for k, v := range t.puts {
 		mutations = append(mutations, &kvrpcpb.Mutation{
@@ -116,16 +173,24 @@ func (t *TinyKVTxn) Commit(ctx context.Context) error {
 		return nil
 	}
 
-	// 2. Group by Region (Batch Grouping)
+	// 2. Group mutations by region
 	groupMutations, err := t.GroupMutations(ctx, mutations)
 	if err != nil {
 		return err
 	}
 
-	// --- Phase 1: Prewrite (Must Succeed for All) ---
-	for regionId, group := range groupMutations {
+	// --- Phase 1: Prewrite (must succeed for all regions) ---
+	for _, group := range groupMutations {
 		if len(group.Mutations) == 0 {
 			continue
+		}
+
+		// [Critical fix] Get the leader's store ID and address
+		leaderStoreID := group.RegionInfo.Leader.StoreId
+		addr, err := t.clusterClient.GetStoreAddr(ctx, leaderStoreID)
+		if err != nil {
+			t.Rollback(ctx, mutations)
+			return err
 		}
 
 		preReq := &kvrpcpb.PrewriteRequest{
@@ -135,32 +200,32 @@ func (t *TinyKVTxn) Commit(ctx context.Context) error {
 			LockTtl:      3000,
 		}
 
-		addr := t.clusterClient.regionCache.storeAddrs[regionId]
-		// Use the first key in the group as the routing key
 		respInterface, err := t.clusterClient.SendRequest(ctx, addr, group.RegionInfo, group.Mutations[0].Key, preReq)
 		if err != nil {
-			// Network-level failure; roll back the entire transaction
 			t.Rollback(ctx, mutations)
 			return err
 		}
 
 		preResp := respInterface.(*kvrpcpb.PrewriteResponse)
-		// Handle business-level errors (e.g., Locked/Conflict)
 		if err := t.handlePreWriteResponse(ctx, preResp, nil); err != nil {
-			// Prewrite failed; roll back the entire transaction
 			t.Rollback(ctx, mutations)
 			return err
 		}
 	}
 
-	// --- Phase 2: Commit Primary (Point of No Return) ---
+	// --- Phase 2: Commit Primary (point of no return) ---
 	commitTS := t.getCommitTS()
 
-	// Locate the region containing the primary key
-	// Note: We must re-locate the primary key since groupMutations is an unordered map
-	primaryRegionInfo, addr, err := t.clusterClient.regionCache.LocateRegion(ctx, t.primary)
+	// Relocate the primary key's region (since groupMutations is unordered)
+	primaryRegionInfo, _, err := t.clusterClient.regionCache.LocateRegion(ctx, t.primary)
 	if err != nil {
-		return err // Failure here doesn't require rollback; let locks expire automatically
+		return err
+	}
+
+	// Get the store address where the primary key resides
+	primaryAddr, err := t.clusterClient.GetStoreAddr(ctx, primaryRegionInfo.Leader.StoreId)
+	if err != nil {
+		return err
 	}
 
 	commitPrimaryReq := &kvrpcpb.CommitRequest{
@@ -169,25 +234,20 @@ func (t *TinyKVTxn) Commit(ctx context.Context) error {
 		Keys:          [][]byte{t.primary},
 	}
 
-	respInterface, err := t.clusterClient.SendRequest(ctx, addr, primaryRegionInfo, t.primary, commitPrimaryReq)
-	// If network fails during primary commit, we cannot determine success/failure.
-	// Simply return error and let client retry or check status later.
+	respInterface, err := t.clusterClient.SendRequest(ctx, primaryAddr, primaryRegionInfo, t.primary, commitPrimaryReq)
 	if err != nil {
 		return err
 	}
 
 	primaryResp := respInterface.(*kvrpcpb.CommitResponse)
 	if err := t.handleCommitResponse(ctx, primaryResp, nil); err != nil {
-		// Primary commit failed at business level (e.g., lock missing); transaction fails
+		// Primary commit failed — the transaction is aborted
 		return err
 	}
 
-	// --- Phase 3: Commit Secondaries (Async Best-Effort) ---
-	// Primary has succeeded, so the transaction is guaranteed to succeed.
-	// Even if secondary commits fail, it's acceptable.
+	// --- Phase 3: Commit Secondaries (asynchronous, best-effort) ---
 	go func() {
-		for regionId, group := range groupMutations {
-			// Extract secondary keys from this group (exclude primary)
+		for _, group := range groupMutations {
 			var secondaryKeys [][]byte
 			for _, m := range group.Mutations {
 				if !bytes.Equal(m.Key, t.primary) {
@@ -204,11 +264,15 @@ func (t *TinyKVTxn) Commit(ctx context.Context) error {
 				Keys:          secondaryKeys,
 			}
 
-			addr := t.clusterClient.regionCache.storeAddrs[regionId]
-			// Send asynchronously; ignore errors
-			respInterface, err := t.clusterClient.SendRequest(context.Background(), addr, group.RegionInfo, secondaryKeys[0], commitSecondariesReq)
+			// Get the store address for the secondary keys
+			secAddr, err := t.clusterClient.GetStoreAddr(context.Background(), group.RegionInfo.Leader.StoreId)
+			if err != nil {
+				// Skip on error; cleanup will be handled later by resolve-lock mechanisms
+				continue
+			}
+
+			respInterface, err := t.clusterClient.SendRequest(context.Background(), secAddr, group.RegionInfo, secondaryKeys[0], commitSecondariesReq)
 			if err == nil {
-				// Only used to handle possible RegionError and update cache; no need to handle Locked errors
 				t.handleCommitResponse(context.Background(), respInterface.(*kvrpcpb.CommitResponse), nil)
 			}
 		}
@@ -284,7 +348,7 @@ func (t *TinyKVTxn) GroupMutations(ctx context.Context, mutations []*kvrpcpb.Mut
 // ---------------------------handle response----------------------------
 func (t *TinyKVTxn) handleGetResponse(ctx context.Context, resp *kvrpcpb.GetResponse, err error) error {
 	if err != nil {
-		return &storage.RetryableError{Msg: "network jitter"}
+		return &RetryableError{Msg: "network jitter"}
 	}
 	if resp.RegionError != nil {
 		return t.handleRegionErr(resp.RegionError, nil)
@@ -296,7 +360,7 @@ func (t *TinyKVTxn) handleGetResponse(ctx context.Context, resp *kvrpcpb.GetResp
 			return resolveErr
 		}
 		if isSolved {
-			return &storage.RetryableError{Msg: "lock is solved"}
+			return &RetryableError{Msg: "lock is solved"}
 		}
 		return fmt.Errorf("key is locked: %v", resp.Error.Locked)
 	}
@@ -306,7 +370,7 @@ func (t *TinyKVTxn) handleGetResponse(ctx context.Context, resp *kvrpcpb.GetResp
 // handlePreWriteResponse check if PreWrite success
 func (t *TinyKVTxn) handlePreWriteResponse(ctx context.Context, resp *kvrpcpb.PrewriteResponse, err error) error {
 	if err != nil {
-		return &storage.RetryableError{Msg: "network jitter"}
+		return &RetryableError{Msg: "network jitter"}
 	}
 	if resp.RegionError != nil {
 		return t.handleRegionErr(resp.RegionError, t.primary)
@@ -323,7 +387,7 @@ func (t *TinyKVTxn) handlePreWriteResponse(ctx context.Context, resp *kvrpcpb.Pr
 					return resolveErr
 				}
 				if isSolved {
-					return &storage.RetryableError{Msg: "lock is solved"}
+					return &RetryableError{Msg: "lock is solved"}
 				}
 				return fmt.Errorf("key is locked: %v", keyErr.Locked)
 			}
@@ -337,7 +401,7 @@ func (t *TinyKVTxn) handlePreWriteResponse(ctx context.Context, resp *kvrpcpb.Pr
 func (t *TinyKVTxn) handleCommitResponse(ctx context.Context, resp *kvrpcpb.CommitResponse, err error) error {
 	//  network error,if retry? Network jitter
 	if err != nil {
-		return &storage.RetryableError{Msg: "network jitter"}
+		return &RetryableError{Msg: "network jitter"}
 	}
 	if resp.RegionError != nil {
 		// When encountering Region errors (e.g., NotLeader, RegionNotFound, EpochNotMatch)
@@ -355,7 +419,7 @@ func (t *TinyKVTxn) handleCommitResponse(ctx context.Context, resp *kvrpcpb.Comm
 			// Found a commit record later than my StartTS.
 			// This conflict cannot be resolved by retrying (because my StartTS is already outdated).
 			// Must abort and restart with a new StartTS.
-			return &storage.RetryableError{Msg: "write conflict"}
+			return &RetryableError{Msg: "write conflict"}
 		}
 		// B. lock conflict (Locked)
 		if resp.Error.Locked != nil {
@@ -366,7 +430,7 @@ func (t *TinyKVTxn) handleCommitResponse(ctx context.Context, resp *kvrpcpb.Comm
 			isSolved, _ := t.resolveLocks(ctx, resp.Error.Locked)
 			if isSolved {
 				// the lock is solved, sending the txn again
-				return &storage.RetryableError{Msg: "lock is solved"}
+				return &RetryableError{Msg: "lock is solved"}
 
 			} else {
 				// the lock is still stuck there,what we can do is just wait
@@ -435,5 +499,10 @@ func (t *TinyKVTxn) handleRegionErr(re *errorpb.Error, key []byte) error {
 			t.clusterClient.regionCache.InvalidateCache(key)
 		}
 	}
-	return &storage.RetryableError{Msg: "region error"}
+	return &RetryableError{Msg: "region error"}
+}
+
+// GetStoreAddr 获取 Store 地址 (对外暴露)
+func (c *ClusterClient) GetStoreAddr(ctx context.Context, storeID uint64) (string, error) {
+	return c.regionCache.getStoreAddr(ctx, storeID)
 }
