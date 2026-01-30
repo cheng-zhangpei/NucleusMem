@@ -82,17 +82,148 @@ Since every communication action is fundamentally a storage transaction, Nucleus
 - **Persistence**: All chat histories are persisted as KV pairs (e.g., `Topic/Timestamp/SenderID`). This allows the system to reconstruct the entire conversation flow even after a cluster restart.
 - **Time-Travel Debugging**: Utilizing the underlying MVCC (Multi-Version Concurrency Control) mechanism, developers can query the state of the communication channel at any specific timestamp `T`. This is critical for diagnosing "hallucinations" or logical errors in multi-agent collaborations, as it allows replaying the exact inputs an agent received at a past moment.
 
-## 2. Architecture Design
+## 2. Design
 
-### 2.1 the client of tinyKV
+### 2.1 project structure
+
+```
+.
+├── api/                    # [Added] Contains .proto and K8s CRD definitions
+│   ├── v1/                 # Protobuf (RPC Protocol)
+│   └── crd/                # K8s CRD (YAML Definitions)
+├── cmd/                    # Entry points (Main functions)
+│   ├── standalone/         # Standalone debug entry (Agent + MemSpace + TinyKV all-in-one)
+│   ├── compute-node/       # [Data Plane] Agent Runtime image entry
+│   └── controller-manager/ # [Control Plane] NucleusMem controller (Non-K8s Operator)
+├── pkg/
+│   ├── client/             # Go SDK (For user code consumption)
+│   ├── controller/         # Business logic control (AgentManager, MemSpaceManager)
+│   ├── network/            # Network encapsulation (gRPC, Transport)
+│   ├── runtime/            # Runtime logic (Agent Loop, LLM calls)
+│   └── storage/            # Storage layer (TinyKV Client, Txn)
+├── tinykv/                 # [Submodule] TinyKV source code
+└── Dockerfile              # For building container images
+```
+
+### 2.2 deploy
+
+- components
+
+| entry (cmd/)       | Binary        | K8s         | replicas   | Role                                                         | dependencies     |
+| ------------------ | ------------- | ----------- | ---------- | ------------------------------------------------------------ | ---------------- |
+| tinykv-server      | tinykv        | StatefulSet | 3+         | Storage layer. Each Pod has an independent PVC (hard disk) and a fixed network identifier. | PD               |
+| pd-server          | pd            | Deployment  | 3          | Scheduling layer. Raft election, stateless (data stored in Etcd). | -                |
+| controller-manager | nucleus-ctrl  | Deployment  | 1 (Leader) | Control plane. The logic for the Operator runs here (or independently). | K8s API & PD     |
+| compute-node       | nucleus-agent | Deployment  | N          | Computing layer. Runs agent logic, stateless, and is launched on demand. | TinyKV           |
+| memspace           | nucleus-mem   | StatefulSet | N          | Memory space layer. Manages persistent memory and state for stateless agents. Each Pod has associated PVC for storing agent memories and states. | K8s API & TinyKV |
+
+- CRD
+
+| Component/Object          | K8s Resource Type | CRD Definition (Key Fields)                                  | Operator Reconcile Logic                                     | Backend Action                                               |
+| ------------------------- | ----------------- | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Cluster (TinyKV+PD)       | NucleusCluster    | Spec: pdReplicas: 3 storeReplicas: 3 image: "v1.0"  Status: ReadyStores: [1, 2, 3] | 1. Check if PD Deployment exists? If not, create it. 2. Check if TinyKV StatefulSet exists? If not, create it. 3. Check if Store count meets storeReplicas requirement? Scale up/down if not. | Launch Pods, Mount PVC, Start processes.                     |
+| MemSpace (Memory Space)   | MemSpace          | Spec: name: "shared-01" type: "SHARED" quota: "10Gi"  Status: regionID: 100 peers: [1, 2, 3] | 1. Check if Status.RegionID is empty? 2. If empty -> Call PD Client to request new Region. 3. Update Status to record RegionID. 4. Check if Region replica count meets configuration? Call PD scheduler if not. | Call pd.AllocID, Call Split, Call AddPeer.                   |
+| Agent (Intelligent Agent) | Agent             | Spec: role: "Coder" mount: ["shared-01"]  Status: phase: "Running" | 1. Check if Deployment named agent-{name} exists? 2. If not -> Create Deployment. 3. Inject configuration -> Convert MemSpace ID from mount to environment variable MEM_ID=100 and inject into container. 4. Update Status. | Start compute-node process, initialize ClusterClient inside process to connect. |
+
+- phase:
+
+component dev (current) -->  docker compose --> operator dev
+
+### 2.2 the client of tinyKV
 
 As a teaching project under PingCap's talent program, TinyKV does not provide a reliable, complete client (not even a third-party repository on GitHub...). If we aim to use TinyKV as our foundation, we must implement a highly available client ourselves. Within the Percolator transaction model, the client serves as the transaction coordinator with cross-cluster capabilities. Developing a fully production-ready client is challenging, so we've implemented a basic version that handles cross-cluster coordination and backoff retries. This enables NucleusMem to support cross-cluster transactions.
 
-### 2.2 architecture
+### 2.2.1 architecture
 
-![client](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/arch-of-client.md)
+![client](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/arch-of-client.png)
+
+MemClient maintains a Txn retry loop. If the server returns a repeatable error, it triggers the loop's retransmission and backoff mechanism. The backoff mechanism has not yet been designed. Each MemClient maintains an instance of a transaction factory, which generates Txn objects and assigns them initial Txn properties.
+
+Txn maintains two simple buffers to store write operations for the current transaction. During delete and put operations, data is simply saved into the buffer. The Core of Txn is preWrite and commit, will introduce later.
+
+Each transaction maintains a ClusterRouter responsible for managing the region cache, distributing different keys to their corresponding regions, and maintaining the gRPC connection pool.
+
+### 2.2.2 preWrite and commit
+
+The transaction commitment process in `NucleusMem` strictly follows the **Percolator** Two-Phase Commit (2PC) protocol. Since TinyKV servers are stateless regarding transaction coordination, the client (`Txn` object) orchestrates the entire lifecycle.
+
+- Phase 1: Prewrite (Locking)
+
+When the user calls `txn.Commit()`, the client first enters the Prewrite phase. The goal is to lock all keys involved in the transaction and write the data to the storage.
+
+1. **Batch Grouping**: The client iterates through the local write buffer (`puts` and `deletes`). Using the `ClusterRouter`, it groups mutations by their target **Region**. This is crucial because a `KvPrewrite` RPC can only be sent to the Leader of a specific Region.
+2. **Primary Key Selection**: The client selects one key as the **Primary Key** (currently, the first key in the buffer). This key's status determines the fate of the entire transaction.(For now, I just maintain the first key of the transaction as the primary key.)
+3. Parallel Execution: The client sends KvPrewrite requests to all relevant Region Leaders.
+  - **Conflict Check**: If the server returns a `WriteConflict` (meaning another transaction committed after our StartTS), the client aborts immediately.
+  - **Lock Resolution**: If the server returns `KeyLocked`, the client attempts to resolve the lock (querying the status of the lock's Primary Key via `KvCheckTxnStatus` and cleaning it up via `KvResolveLock`) before retrying.
+4. **Rollback**: If any Region fails to prewrite (e.g., due to unresolvable conflict or network partition), the client initiates a `Rollback` operation for all keys to clean up partial locks.
+
+- Phase 2: Commit (Making it Visible)
+
+Once all Prewrites succeed, the transaction is considered "locked". The client then proceeds to make the changes visible.
+
+1. Commit Primary: The client requests a CommitTSfrom the TSO (Timestamp Oracle,But now the project just use localTimeStamp). It then sends a KvCommit request only for the Primary Key.
+  - **Point of No Return**: If the Primary Key is successfully committed, the transaction is logically successful. Even if the client crashes afterwards, other transactions can roll forward the secondary keys by checking the Primary's status.
+2. Commit Secondaries (Async): After the Primary commit succeeds, the client sendsKvCommitrequests for all remaining keys (Secondary Keys).
+  - **Optimization**: This step is performed asynchronously. Since the transaction is already logically committed, failures here are non-fatal (locks will be resolved lazily by future readers).
+
+This client-side coordination ensures **Snapshot Isolation (SI)** and **Atomicity** across multiple distributed nodes, providing a robust consistency guarantee for the upper-level Agent Memory system.
+
+### 2.2.3 dispatch
+
+To support a distributed architecture where keys are sharded across multiple Regions and Stores, the client must intelligently route requests to the correct destination. The `ClusterClient` handles this complexity through a robust dispatch mechanism.
+
+1. Region Location & Caching
+
+The client maintains a local **Region Cache** to minimize interactions with the PD (Placement Driver).
+
+- **Locate**: When a request for a `Key` arrives, the client checks the cache to find the corresponding Region and its Leader's Store address.
+- **Cache Miss**: If the cache is empty or stale, the client queries PD to fetch the latest routing information (Region Epoch, Peers, Leader) and updates the local cache.
+
+2. Request Dispatching
+
+The `SendRequest` method serves as the unified entry point for all RPCs (`Get`, `Scan`, `Prewrite`, `Commit`).
+
+- **Context Injection**: It automatically injects the `RegionContext` (RegionID, Epoch, Peer) into the gRPC request header, ensuring the server can validate the request.
+- **Protocol Adaptation**: It handles different types of requests using a type switch, invoking the corresponding gRPC method on the target Store's client stub.
+
+3. Error Handling & Retry Loop
+
+The dispatch logic includes a built-in retry loop to handle dynamic cluster changes:
+
+- **NotLeader**: If the server responds that it is not the Leader, the client updates its cache with the Leader hint provided by the server and retries immediately.
+- **EpochNotMatch**: If the Region has split or merged, the client invalidates the dirty cache entry and fetches the new topology from PD before retrying.
+- **Network Failure**: If the connection fails, the client attempts to reconnect or re-resolve the Store address.
+
+This design decouples the transaction logic from network topology, allowing `Txn` to operate as if it were talking to a single local database.
+
+### 2.2.4 RegionCache
+
+The `RegionCache` is a critical component for performance, acting as a local map of the distributed cluster. Instead of querying PD for every request, the client consults this cache to find the target Region.
+
+#### 1. B-Tree Indexing Strategy
+
+The cache stores Region metadata in a **B-Tree** (using `google/btree`) to support efficient range queries.
+
+- **Key Selection**: The B-Tree indexes Regions by their **EndKey**.
+
+- Why EndKey?: A Region covers a range[StartKey, EndKey). When we search for a specificKey, we need to find the Region that contains it. Since ranges are continuous and non-overlapping, the target Region is the
+
+  first Region whose EndKey is greater than the target Key.
+
+  - *Search Logic*: `Seek(Key)` on the B-Tree returns the smallest item `>= Key`. If we indexed by StartKey, a simple Seek might land us on the *next* Region, not the *containing* Region. Indexing by EndKey allows us to locate the containing Region in `O(log N)` time.
+
+#### 2. Cache Maintenance
+
+The cache is not static; it evolves with the cluster state.
+
+- **Lazy Loading**: The cache starts empty. Regions are loaded from PD only when accessed (Demand-Driven).
+- **Invalidation**: When a `RegionError` (e.g., `EpochNotMatch`) occurs during a request, it indicates the cached topology is outdated (e.g., due to a split). The client removes the invalid Region from the B-Tree.
+- **Update**: Upon receiving new information (from PD or Leader hints), the client inserts the new Region info. The B-Tree structure automatically handles the ordering, ensuring that subsequent lookups route correctly to the new layout (e.g., finding the correct sub-region after a split).
+
+This mechanism ensures that the client's view of the cluster eventually converges with the actual topology, maintaining high availability even during rebalancing or failover events.
+
+## 3. Future
 
 
-
-## 3.Futrue
 
