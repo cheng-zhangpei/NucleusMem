@@ -32,7 +32,7 @@ func (c *MemClient) Update(fn func(txn storage.Transaction) error) error {
 	// maxReTryTime
 	maxRetries := 3
 	for i := 0; i < maxRetries; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 		defer cancel()
 		// 1. start a new txn
 		txn, err := c.Txn.Begin()

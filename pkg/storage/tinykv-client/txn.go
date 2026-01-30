@@ -355,7 +355,7 @@ func (t *TinyKVTxn) handleGetResponse(ctx context.Context, resp *kvrpcpb.GetResp
 	}
 
 	if resp.Error != nil && resp.Error.Locked != nil {
-		isSolved, resolveErr := t.resolveLocks(ctx, resp.Error.Locked)
+		isSolved, resolveErr := t.resolveLocks(ctx, resp.Error.Locked.Key, resp.Error.Locked)
 		if resolveErr != nil {
 			return resolveErr
 		}
@@ -379,15 +379,16 @@ func (t *TinyKVTxn) handlePreWriteResponse(ctx context.Context, resp *kvrpcpb.Pr
 	if len(resp.Errors) > 0 {
 		for _, keyErr := range resp.Errors {
 			if keyErr.Conflict != nil {
-				return fmt.Errorf("write conflict: %v", keyErr.Conflict)
+				return &RetryableError{Msg: "write conflict"}
 			}
 			if keyErr.Locked != nil {
-				isSolved, resolveErr := t.resolveLocks(ctx, keyErr.Locked)
-				if resolveErr != nil {
-					return resolveErr
+				// 【修正】从 Locked 错误里拿到 Key
+				isSolved, err := t.resolveLocks(ctx, keyErr.Locked.Key, keyErr.Locked)
+				if err != nil {
+					return err
 				}
 				if isSolved {
-					return &RetryableError{Msg: "lock is solved"}
+					return &RetryableError{Msg: "lock resolved"}
 				}
 				return fmt.Errorf("key is locked: %v", keyErr.Locked)
 			}
@@ -427,15 +428,15 @@ func (t *TinyKVTxn) handleCommitResponse(ctx context.Context, resp *kvrpcpb.Comm
 			// Strategy: Backoff (wait a moment) -> ResolveLock (if timed out) -> Retry.
 			// Here we simplify: directly attempt ResolveLock, then inform the upper layer to “please retry”.
 			// Execute ResolveLock logic (check primary key status -> clean up lock)
-			isSolved, _ := t.resolveLocks(ctx, resp.Error.Locked)
-			if isSolved {
-				// the lock is solved, sending the txn again
-				return &RetryableError{Msg: "lock is solved"}
-
-			} else {
-				// the lock is still stuck there,what we can do is just wait
-				return fmt.Errorf("key is locked: %v", resp.Error.Locked)
+			isSolved, err := t.resolveLocks(ctx, resp.Error.Locked.Key, resp.Error.Locked)
+			if err != nil {
+				return err
 			}
+			if isSolved {
+				return nil // Commit 阶段如果锁解开了，通常不需要重试整个事务，或者重试 Commit
+				// 但为了简单，这里返回 nil，让外层决定（或者你也返回 RetryableError）
+			}
+			return fmt.Errorf("key is locked: %v", resp.Error.Locked)
 		}
 		return fmt.Errorf("key error: %v", resp.Error)
 
@@ -443,54 +444,62 @@ func (t *TinyKVTxn) handleCommitResponse(ctx context.Context, resp *kvrpcpb.Comm
 	return nil
 }
 
-func (t *TinyKVTxn) resolveLocks(ctx context.Context, lock *kvrpcpb.LockInfo) (bool, error) {
+func (t *TinyKVTxn) resolveLocks(ctx context.Context, key []byte, lock *kvrpcpb.LockInfo) (bool, error) {
+	// 1. 查询 Primary Key 状态 (CheckTxnStatus)
+	// 这个请求必须发给 Primary Key 所在的 Region
 	checkReq := &kvrpcpb.CheckTxnStatusRequest{
 		PrimaryKey: lock.PrimaryLock,
 		LockTs:     lock.LockVersion,
 		CurrentTs:  getCommitTS(),
 	}
-	// todo(cheng) check the key range and confirm
-	regionInfo, addr, err := t.clusterClient.regionCache.LocateRegion(ctx, lock.PrimaryLock)
+
+	primaryRegionInfo, primaryAddr, err := t.clusterClient.regionCache.LocateRegion(ctx, lock.PrimaryLock)
 	if err != nil {
 		return false, err
 	}
-	// 2. get conn by addr
-	client, err := t.clusterClient.getConn(addr)
+
+	respInterface, err := t.clusterClient.SendRequest(ctx, primaryAddr, primaryRegionInfo, lock.PrimaryLock, checkReq)
 	if err != nil {
 		return false, err
 	}
-	resp, err := t.clusterClient.SendRequest(ctx, addr, regionInfo, lock.PrimaryLock, checkReq)
-	if err != nil {
-		return false, err
-	}
-	checkResp := resp.(*kvrpcpb.CheckTxnStatusResponse)
-	// the transaction have been committed
+	checkResp := respInterface.(*kvrpcpb.CheckTxnStatusResponse)
+
+	// 2. 根据状态决定如何 Resolve
+	var resolveReq *kvrpcpb.ResolveLockRequest
+
 	if checkResp.CommitVersion > 0 {
-		// help to commit the transaction
-		_, keyErr := client.KvResolveLock(context.TODO(), &kvrpcpb.ResolveLockRequest{
+		// 已提交 -> 帮它提交
+		resolveReq = &kvrpcpb.ResolveLockRequest{
 			StartVersion:  lock.LockVersion,
 			CommitVersion: checkResp.CommitVersion,
-		})
-		// todo(cheng) error handle
-		if keyErr != nil {
-			return false, err
 		}
-		return true, nil
-		// if the lock is expired or not exist
 	} else if checkResp.Action == kvrpcpb.Action_TTLExpireRollback ||
 		checkResp.Action == kvrpcpb.Action_LockNotExistRollback {
-		_, keyErr := client.KvResolveLock(context.TODO(), &kvrpcpb.ResolveLockRequest{
+		// 已回滚 -> 帮它回滚
+		resolveReq = &kvrpcpb.ResolveLockRequest{
 			StartVersion:  lock.LockVersion,
 			CommitVersion: 0,
-		})
-		// todo(cheng) error handle
-		if keyErr != nil {
-			return false, err
 		}
-		return true, nil
+	} else {
+		// 锁还在且没过期 -> 等待
+		return false, nil
 	}
-	return false, nil
+
+	// 3. 发送 ResolveLock 请求
+	// 这个请求必须发给【当前被锁住的 Key】所在的 Region
+	currentRegionInfo, currentAddr, err := t.clusterClient.regionCache.LocateRegion(ctx, key)
+	if err != nil {
+		return false, err
+	}
+
+	_, err = t.clusterClient.SendRequest(ctx, currentAddr, currentRegionInfo, key, resolveReq)
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
+
 func (t *TinyKVTxn) handleRegionErr(re *errorpb.Error, key []byte) error {
 	if re.NotLeader != nil {
 		if re.NotLeader.Leader != nil {

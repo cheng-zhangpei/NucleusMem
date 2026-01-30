@@ -1,8 +1,11 @@
 #!/bin/bash
+GODEBUG=httpmuxgo121=1 $BIN_DIR/pd-server > logs/pd.log 2>&1 &
+PD_PID=$!
+export GODEBUG=httpmuxgo121=1
 
 # Configuration
-PD_SRC="github.com/pingcap-incubator/tinykv/scheduler/server"
-KV_SRC="github.com/pingcap-incubator/tinykv/kv/main"
+PD_SRC="./tinykv/scheduler"
+KV_SRC="./tinykv/kv/main.go"
 BIN_DIR="bin"
 
 echo "[INFO] Starting TinyKV Cluster Deployment..."
