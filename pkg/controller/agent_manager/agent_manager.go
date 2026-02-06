@@ -15,6 +15,7 @@ type AgentManager struct {
 	agentCache  *AgentCache   // maintain the information of every agent which enable the manager to connect every agent
 	grpcServer  *grpc.Server
 	// todo (cheng proto define) monitorClient\agentClient
+
 }
 
 func NewAgentManager(grpcServerAddr string, monitorConfig *configs.MonitorConfig) (*AgentManager, error) {
@@ -45,31 +46,27 @@ func (am *AgentManager) Start() error {
 }
 
 // CreateAgent create agent_manager instance by Agent config(local env)
-func (*AgentManager) CreateAgent(config configs.AgentConfig) {
-
+func (*AgentManager) CreateAgent(config configs.AgentConfig) error {
+	return nil
 }
 
 // DeleteAgent delete agent_manager service in local System
-func (*AgentManager) DeleteAgent(id uint64) {
-
+func (*AgentManager) DeleteAgent(id uint64) error {
+	return nil
 }
 
 // BingMemSpace binding the memspace and agent
-func (*AgentManager) BingMemSpace() {
-
+func (*AgentManager) BingMemSpace() error {
+	return nil
 }
 
 // GenerateAgentService create agents resource in a cloud-native environment (distributed env)
-func (*AgentManager) GenerateAgentService(config configs.AgentConfig) {
-
+func (*AgentManager) GenerateAgentService(config configs.AgentConfig) error {
+	return nil
 }
 
-func (*AgentManager) destroyAgentService(config configs.AgentConfig) {
-
-}
-
-func (*AgentManager) HandleMsg(config configs.AgentConfig) {
-
+func (*AgentManager) destroyAgentService(config configs.AgentConfig) error {
+	return nil
 }
 
 // LoadAgent load the agentCache for each monitors
