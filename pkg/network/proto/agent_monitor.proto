@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package v1;
+option go_package = "github.com/nucleusmem/pkg/network/proto;v1";
+
+// --- Data Structures ---
+
+// AgentConfig 对应你 Go 代码中的 configs.AgentConfig
+// 传输给 Monitor 用于启动 Agent
+message AgentLaunchConfig {
+  uint64 agent_id = 1;
+  string role = 2;              // e.g. "coder", "auditor"
+  string image = 3;             // 容器镜像
+  string bin_path = 4;             // 二进制路径
+  repeated uint64 mount_mem_ids = 5; // 需要挂载的 MemSpace ID 列表
+}
+
+// AgentRuntimeStatus 描述运行中的 Agent 状态
+message AgentRuntimeStatus {
+  string agent_id = 1;
+  string phase = 2;             // "Running", "Pending", "Failed"
+  int64 start_time = 3;
+  int32 restart_count = 4;
+}
+
+// MonitorHeartbeat 描述整个节点的负载和状态
+message MonitorHeartbeat {
+  string node_id = 1;
+  double cpu_usage = 2;         // 节点 CPU 使用率
+  double mem_usage = 3;         // 节点内存使用率
+  int32 active_agents = 4;      // 当前运行的 Agent 数量
+  repeated AgentRuntimeStatus agents = 5; // 详细列表
+}
+
+// --- Request/Response ---
+
+message LaunchAgentRequest {
+  AgentLaunchConfig config = 1;
+}
+
+message LaunchAgentResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message StopAgentRequest {
+  string agent_id = 1;
+}
+
+message StopAgentResponse {
+  bool success = 1;
+}
+
+message HeartbeatRequest {
+  MonitorHeartbeat status = 1;
+}
+
+message HeartbeatResponse {
+  // Manager 可能会在心跳回包中带回一些简单的控制指令
+  bool should_resync = 1;
+}
+
+// --- Service Definition ---
+
+service AgentMonitorService {
+  // Manager 调用 Monitor：下发指令
+  rpc LaunchAgent (LaunchAgentRequest) returns (LaunchAgentResponse);
+  rpc StopAgent (StopAgentRequest) returns (StopAgentResponse);
+  // 也可以暴露一个获取详情的接口
+  rpc GetNodeStatus (Empty) returns (MonitorHeartbeat);
+}
+
+message Empty {}

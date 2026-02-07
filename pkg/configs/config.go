@@ -1,6 +1,7 @@
 package configs
 
 type AgentConfig struct {
+	AgentId             uint64
 	AgentManagerAddr    string
 	MemSpaceManagerAddr string
 	PrivateMemSpaceInfo *MemSpaceInfo
@@ -8,6 +9,9 @@ type AgentConfig struct {
 	ChatServerAddr      string
 	VectorServerAddr    string
 	GRPCServerAddr      string
+	Role                string
+	Image               string
+	Path                string
 }
 
 type MemSpaceInfo struct {
