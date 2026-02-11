@@ -1,58 +1,51 @@
 package agent_manager
 
 import (
+	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
+	"context"
 	"fmt"
-	"net"
-
 	"github.com/pingcap-incubator/tinykv/log"
-	"google.golang.org/grpc"
+	_ "github.com/pingcap-incubator/tinykv/log"
 )
 
 type AgentManager struct {
-	serverAddr  string
-	monitorPool *monitorConns // maintain the message and conn of monitors in each node
-	agentCache  *AgentCache   // maintain the information of every agent which enable the manager to connect every agent
-	grpcServer  *grpc.Server
+	agentCache *AgentCache // maintain the information of every agent which enable the manager to connect every agent
+	//monitorCache *Mo
 	// todo (cheng proto define) monitorClient\agentClient
-
+	agentMonitorClient map[uint64]*client.AgentMonitorClient
 }
 
-func NewAgentManager(grpcServerAddr string, monitorConfig *configs.MonitorConfig) (*AgentManager, error) {
+func NewAgentManager(agentManagerConfig *configs.AgentManagerConfig) (*AgentManager, error) {
 	// 1, build monitor conn
-	monitorConns := NewMonitorConns()
-	for id, addr := range monitorConfig.GrpcServerAddrs {
-		err := monitorConns.AddConn(id, addr)
+	am := &AgentManager{nil, nil}
+	ctx := context.Background()
+	monitorClients := make(map[uint64]*client.AgentMonitorClient)
+	for id, monitorConfig := range agentManagerConfig.MonitorURLs {
+		mc := client.NewAgentMonitorClient(monitorConfig)
+		//id, _ := strconv.ParseUint(id, 10, 64)
+		monitorClients[id] = mc
+	}
+	am.agentMonitorClient = monitorClients
+	agentCache := NewAgentCache()
+	// 2. 从每个 Monitor 拉取当前状态，填充 cache
+	for id, _ := range monitorClients {
+		nodeStatus, err := am.GetNodeStatus(ctx, id)
 		if err != nil {
-			log.Errorf("the monitor %d is not ready!,err:%v \n", id, err)
+			return nil, err
+		}
+		// 将每个 running agent 加入 cache
+		for _, agentStatus := range nodeStatus.Agents {
+			agentCache.UpdateAgent(&AgentInfo{
+				AgentID:  agentStatus.AgentID,
+				Status:   agentStatus.Phase,
+				NodeAddr: nodeStatus.NodeID, // 或存储 nodeID
+				// MemSpaceID 暂时无法从 status 获取，后续可扩展
+			})
 		}
 	}
-	agentCache := NewAgentCache()
-	// todo(cheng) 2、 using monitor client to update the agentCache
-	return &AgentManager{grpcServerAddr, monitorConns, agentCache, nil}, nil
-}
-
-// Start launch the grpc service
-func (am *AgentManager) Start() error {
-	lis, err := net.Listen("tcp", am.serverAddr)
-	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
-	}
-	am.grpcServer = grpc.NewServer()
-	// todo(cheng) after the proto file finish
-	// pb.RegisterAgentManagerServer(am.grpcServer, newManagerService(am))
-	log.Infof("AgentManager listening on %s\n", am.serverAddr)
-	return am.grpcServer.Serve(lis)
-}
-
-// CreateAgent create agent_manager instance by Agent config(local env)
-func (*AgentManager) CreateAgent(config configs.AgentConfig) error {
-	return nil
-}
-
-// DeleteAgent delete agent_manager service in local System
-func (*AgentManager) DeleteAgent(id uint64) error {
-	return nil
+	return &AgentManager{agentCache, monitorClients}, nil
 }
 
 // BingMemSpace binding the memspace and agent
@@ -72,4 +65,44 @@ func (*AgentManager) destroyAgentService(config configs.AgentConfig) error {
 // LoadAgent load the agentCache for each monitors
 func (*AgentManager) LoadAgent() {
 
+}
+func (am *AgentManager) LaunchAgentOnNode(ctx context.Context, nodeID uint64, req *api.LaunchAgentRequestHTTP) error {
+	monitorClient, ok := am.agentMonitorClient[nodeID]
+	if !ok {
+		return fmt.Errorf("no client for node %d", nodeID)
+	}
+	resp, err := monitorClient.LaunchAgent(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("launch failed: %s", resp.ErrorMessage)
+	}
+	log.Infof("[agent_manager]launch agent on node %d", nodeID)
+	return nil
+}
+
+func (am *AgentManager) StopAgentOnNode(ctx context.Context, nodeID uint64, agentID uint64) error {
+	monitorClient, ok := am.agentMonitorClient[nodeID]
+	if !ok {
+		return fmt.Errorf("no client for node %d", nodeID)
+	}
+	resp, err := monitorClient.StopAgent(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("stop failed: %s", resp.ErrorMessage)
+	}
+	log.Infof("[agent_manager] stop agent on node %d", nodeID)
+
+	return nil
+}
+
+func (am *AgentManager) GetNodeStatus(ctx context.Context, nodeID uint64) (*api.MonitorHeartbeatHTTP, error) {
+	monitorClient, ok := am.agentMonitorClient[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("no client for node %d", nodeID)
+	}
+	return monitorClient.GetStatus(ctx)
 }

@@ -8,24 +8,22 @@ type AgentConfig struct {
 	PublicMemSpaceInfo  []*MemSpaceInfo
 	ChatServerAddr      string
 	VectorServerAddr    string
-	GRPCServerAddr      string
 	Role                string
 	Image               string
 	Path                string
+	IsJob               bool
 }
 
 type MemSpaceInfo struct {
 	MemSpaceId   uint64
 	MemSpaceAddr string
 }
-type AgentManagerConfig struct {
-	// the
-	//
-	//agent info provided by the user
-	monitors []*MonitorConfig
-	// grpcServerAddr
 
+// AgentManagerConfig AgentManager 的启动配置
+type AgentManagerConfig struct {
+	MonitorURLs map[uint64]string `yaml:"monitor_urls"` // nodeID -> http://host:port
 }
+
 type MonitorConfig struct {
-	GrpcServerAddrs map[uint64]string
+	MonitorUrl string
 }

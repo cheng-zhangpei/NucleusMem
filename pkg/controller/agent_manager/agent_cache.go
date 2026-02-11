@@ -2,17 +2,18 @@ package agent_manager
 
 import "sync"
 
-// AgentInfo 定义你希望缓存的 Agent 信息
+// AgentInfo 缓存的 Agent 元信息
 type AgentInfo struct {
 	AgentID    string
-	Status     string // Running, Pending, Failed
-	NodeAddr   string
-	MemSpaceID uint64
+	Status     string // Running, Failed, Stopped
+	NodeID     uint64 // 所属 Monitor 节点 ID
+	NodeAddr   string // Monitor 节点标识（如 hostname）
+	MemSpaceID uint64 // 可选：挂载的 MemSpace ID（未来扩展）
 }
 
 type AgentCache struct {
 	mu     sync.RWMutex
-	agents map[string]*AgentInfo
+	agents map[string]*AgentInfo // key: agent_id (string)
 }
 
 func NewAgentCache() *AgentCache {
@@ -32,4 +33,15 @@ func (ac *AgentCache) GetAgent(agentID string) (*AgentInfo, bool) {
 	defer ac.mu.RUnlock()
 	info, ok := ac.agents[agentID]
 	return info, ok
+}
+
+// GetAllAgents 返回所有缓存的 agents（用于 debug 或全局视图）
+func (ac *AgentCache) GetAllAgents() []*AgentInfo {
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
+	agents := make([]*AgentInfo, 0, len(ac.agents))
+	for _, a := range ac.agents {
+		agents = append(agents, a)
+	}
+	return agents
 }
