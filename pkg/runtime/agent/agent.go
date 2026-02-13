@@ -4,12 +4,13 @@ import (
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"sync"
-	"time"
 )
 
 // Agent represents an AI agent that connects to memory spaces and services
 type Agent struct {
+	AgentId               uint64
 	memSpaceClients       map[uint64]*client.MemSpaceClient // memSpaceID -> HTTP client
 	memSpaceManagerClient *client.MemSpaceManagerClient
 	chatClient            *client.ChatServerClient
@@ -17,14 +18,16 @@ type Agent struct {
 	mu                    sync.RWMutex
 	isJob                 bool
 
-	tempMemory []client.ChatMessage // 内存中的对话历史
-	maxHistory int                  // 最大历史轮数（可配置）
-
+	tempMemory     []client.ChatMessage // 内存中的对话历史
+	maxHistory     int                  // 最大历史轮数（可配置）
+	boundMonitorID uint64
+	boundMu        sync.RWMutex
 }
 
 // NewAgent creates a new Agent and initializes all service clients
 func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 	agent := &Agent{
+		AgentId:               config.AgentId,
 		memSpaceClients:       make(map[uint64]*client.MemSpaceClient),
 		memSpaceManagerClient: client.NewMemSpaceManagerClient(config.MemSpaceManagerAddr),
 		chatClient:            client.NewChatServerClient(config.ChatServerAddr),
@@ -79,9 +82,9 @@ func (a *Agent) GetMemSpaceClient(memSpaceID uint64) (*client.MemSpaceClient, bo
 	return client, ok
 }
 
+// TempChat handles user input and returns LLM response
 func (a *Agent) TempChat(input string) (string, error) {
 	if a.isJob {
-		// Job Agent 不维护记忆，直接调用 QuickChat
 		resp, err := a.chatClient.QuickChat(input)
 		if err != nil {
 			return "", err
@@ -89,29 +92,62 @@ func (a *Agent) TempChat(input string) (string, error) {
 		return resp.Response, nil
 	}
 
-	// 常驻 Agent：追加用户消息
 	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Initialize with system message if empty
+	if len(a.tempMemory) == 0 {
+		a.tempMemory = append(a.tempMemory, client.ChatMessage{
+			Role:    "system",
+			Content: "You are a helpful AI assistant.",
+		})
+	}
+
+	// Add user message
 	a.tempMemory = append(a.tempMemory, client.ChatMessage{
 		Role:    "user",
 		Content: input,
 	})
 
-	// 截断历史（保留最近 maxHistory 条，必须是偶数，user+assistant 成对）
-	if len(a.tempMemory) > a.maxHistory {
-		// 从前面截掉多余的（保留最近的）
-		a.tempMemory = a.tempMemory[len(a.tempMemory)-a.maxHistory:]
+	// Safe truncation helper
+	truncateHistory := func() {
+		if a.maxHistory <= 0 {
+			return
+		}
+		// Ensure we keep at least the system message
+		minLen := 1
+		if len(a.tempMemory) <= minLen {
+			return
+		}
+		// Calculate how many messages to keep (including system)
+		keepCount := a.maxHistory
+		if keepCount < minLen {
+			keepCount = minLen
+		}
+		// If we have more messages than we want to keep
+		if len(a.tempMemory) > keepCount {
+			// Keep system message + most recent (keepCount - 1) messages
+			newHistory := make([]client.ChatMessage, keepCount)
+			newHistory[0] = a.tempMemory[0] // System message
+			copy(newHistory[1:], a.tempMemory[len(a.tempMemory)-(keepCount-1):])
+			a.tempMemory = newHistory
+		}
 	}
-	history := make([]client.ChatMessage, len(a.tempMemory))
-	copy(history, a.tempMemory)
-	a.mu.Unlock()
 
-	// 调用 LLM
+	// Truncate before sending to LLM
+	truncateHistory()
+
+	// Prepare request
 	req := client.ChatCompletionRequest{
-		Messages:    history,
+		Messages:    a.tempMemory,
 		Temperature: 0.7,
 		MaxTokens:   512,
 	}
+
+	// Make LLM call (unlock during network call)
+	a.mu.Unlock()
 	chatResp, err := a.chatClient.ChatCompletion(req)
+	a.mu.Lock()
 	if err != nil {
 		return "", err
 	}
@@ -122,27 +158,41 @@ func (a *Agent) TempChat(input string) (string, error) {
 
 	response := chatResp.Choices[0].Message.Content
 
-	// 保存助手回复到临时记忆
-	a.mu.Lock()
+	// Add assistant response
 	a.tempMemory = append(a.tempMemory, client.ChatMessage{
 		Role:    "assistant",
 		Content: response,
 	})
-	// 再次截断（因为刚加了一条）
-	if len(a.tempMemory) > a.maxHistory {
-		a.tempMemory = a.tempMemory[len(a.tempMemory)-a.maxHistory:]
-	}
-	a.mu.Unlock()
+
+	// Final truncation after adding response
+	truncateHistory()
 
 	return response, nil
 }
 
 // Chat is the main chat interface
 func (a *Agent) Chat(input string) (string, error) {
+	// todo(cheng) after the memspace finished
 	return "nil", nil
 }
 
 // Close is a no-op for HTTP clients (no persistent connections)
 func (a *Agent) Close() {
+
 	// HTTP clients don't need explicit close
+}
+
+// SetBoundMonitor records which monitor this agent is bound to
+func (a *Agent) SetBoundMonitor(monitorID uint64) {
+	a.boundMu.Lock()
+	defer a.boundMu.Unlock()
+	log.Infof("the agent %d have been bound in monitor %d", a.AgentId, monitorID)
+	a.boundMonitorID = monitorID
+}
+
+// GetBoundMonitor returns the current bound monitor ID
+func (a *Agent) GetBoundMonitor() uint64 {
+	a.boundMu.RLock()
+	defer a.boundMu.RUnlock()
+	return a.boundMonitorID
 }

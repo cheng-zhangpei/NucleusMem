@@ -1,13 +1,15 @@
 package agent_monitor
 
 import (
+	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
-	"NucleusMem/pkg/runtime/agent"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,8 +19,10 @@ type AgentMonitor struct {
 	Config *configs.MonitorConfig
 
 	// 状态保护
-	mu     sync.RWMutex
-	agents map[string]*agent.Agent
+	mu      sync.RWMutex
+	agents  map[string]*AgentInfo
+	clients map[uint64]*client.AgentClient // For connected external agents
+	// todo(cheng) WAL日志的思路，记录agent所绑定的memspace，这个做法是用于故障恢复，agent在绑定之前需要同步在monitor中更新缓存
 }
 
 // AgentMonitorInfo 本地节点的监控汇总信息
@@ -32,34 +36,11 @@ type AgentMonitorInfo struct {
 
 func NewAgentMonitor(config *configs.MonitorConfig) *AgentMonitor {
 	return &AgentMonitor{
-		Config: config,
-		agents: make(map[string]*agent.Agent),
+		Config:  config,
+		agents:  make(map[string]*AgentInfo),
+		clients: make(map[uint64]*client.AgentClient), // Initialize client registry
+
 	}
-}
-
-// CreateAgent 负责实际启动一个 Agent (进程或容器)
-func (am *AgentMonitor) CreateAgent(config *configs.AgentConfig) error {
-	am.mu.Lock()
-	defer am.mu.Unlock()
-
-	agentKey := strconv.FormatUint(config.AgentId, 10)
-
-	// 1. 幂等检查
-	if _, exists := am.agents[agentKey]; exists {
-		return fmt.Errorf("agent %s is already running", agentKey)
-	}
-
-	fmt.Printf("[Monitor] Launching Agent ID=%d, Role=%s, Image=%s, Path=%s\n",
-		config.AgentId, config.Role, config.Image, config.Path)
-
-	// 2. TODO: 这里对接 Docker SDK 或 os/exec
-	// cmd := exec.Command(config.BinPath, ...)
-	// err := cmd.Start()
-
-	// 3. 更新内存状态
-	am.agents[agentKey] = &agent.Agent{}
-
-	return nil
 }
 
 // DestroyAgent 负责停止并清理 Agent
@@ -82,12 +63,15 @@ func (am *AgentMonitor) DestroyAgent(agentID string) error {
 	return nil
 }
 
-// GetMonitorInfo 获取当前节点监控快照
 func (am *AgentMonitor) GetMonitorInfo() *AgentMonitorInfo {
-	// 1. 获取 CPU 使用率（阻塞约 500ms 以计算平均值）
-	cpuPercent, err := cpu.Percent(500*time.Millisecond, false)
+	// 1. 获取 CPU 使用率（需要两次采样）
+	// 第一次采样（丢弃结果）
+	cpu.Percent(0, false)
+	// 等待 200ms
+	time.Sleep(200 * time.Millisecond)
+	// 第二次采样（获取真实值）
+	cpuPercent, err := cpu.Percent(0, false)
 	if err != nil || len(cpuPercent) == 0 {
-		// fallback
 		cpuPercent = []float64{0.0}
 	}
 
@@ -104,49 +88,66 @@ func (am *AgentMonitor) GetMonitorInfo() *AgentMonitorInfo {
 	am.mu.RUnlock()
 
 	return &AgentMonitorInfo{
-		NodeID:       strconv.FormatUint(am.id, 10), // e.g., os.Hostname()
-		CpuUsage:     cpuPercent[0] / 100.0,         // 转为 0.0~1.0
+		NodeID:       strconv.FormatUint(am.id, 10),
+		CpuUsage:     cpuPercent[0] / 100.0, // 转为 0.0~1.0
 		MemUsage:     vmStat.UsedPercent / 100.0,
 		ActiveAgents: activeAgents,
 	}
 }
 
-func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) error {
+func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) (*AgentInfo, error) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
 	agentKey := strconv.FormatUint(req.AgentID, 10)
 	if _, exists := am.agents[agentKey]; exists {
-		return fmt.Errorf("agent %s is already running", agentKey)
+		return nil, fmt.Errorf("agent %s is already running", agentKey)
 	}
 
-	// 构建内部配置（未来可从 MemSpaceManager 查询实际地址）
-	_ = &configs.AgentConfig{
-		AgentId: req.AgentID,
-		Role:    req.Role,
-		Image:   req.Image,
-		Path:    req.BinPath,
+	log.Infof("[agent_monitor] Launching Agent ID=%d, Role=%s", req.AgentID, req.Role)
+
+	agentConfig := &configs.AgentConfig{
+		AgentId:  req.AgentID,
+		Role:     req.Role,
+		Image:    req.Image,
+		Path:     req.BinPath,
+		HttpAddr: req.HttpAddress,
 	}
 
-	// TODO: 实际启动进程或容器
-	log.Infof("[agent_monitor] Launching Agent ID=%d, Role=%s\n", req.AgentID, req.Role)
+	agentClient := client.NewAgentClient(agentConfig.HttpAddr)
+	am.clients[req.AgentID] = agentClient
 
-	am.agents[agentKey] = &agent.Agent{}
-	return nil
+	agentInfo := &AgentInfo{
+		AgentID: req.AgentID,
+		Addr:    req.HttpAddress,
+	}
+	am.agents[agentKey] = agentInfo
+
+	return agentInfo, nil
 }
 
-// StopAgent 接收 Manager 的停止指令
+// pkg/agent_monitor/agent_monitor.go
 func (am *AgentMonitor) StopAgent(agentID uint64) error {
 	am.mu.Lock()
-	defer am.mu.Unlock()
+	client, exists := am.clients[agentID]
+	am.mu.Unlock()
 
-	agentKey := strconv.FormatUint(agentID, 10)
-	if _, exists := am.agents[agentKey]; !exists {
+	if !exists {
 		return fmt.Errorf("agent %d not found", agentID)
 	}
 
-	log.Infof("[agent_monitor] Stopping Agent ID=%d...\n", agentID)
-	delete(am.agents, agentKey)
+	// Step 1: 通知 Agent 自我销毁
+	err := client.Shutdown()
+	if err != nil {
+		log.Warnf("[agent_monitor] Failed to shutdown Agent %d: %v", agentID, err)
+		// 继续清理本地状态（避免僵尸记录）
+	}
+	// Step 2: 清理本地状态
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	delete(am.agents, strconv.FormatUint(agentID, 10))
+	delete(am.clients, agentID)
+	log.Infof("[agent_monitor] Stopped Agent ID=%d", agentID)
 	return nil
 }
 
@@ -168,4 +169,89 @@ func (am *AgentMonitor) GetNodeStatusInternal() *MonitorNodeStatusInternal {
 		Agents:       agentStatuses,
 		Timestamp:    time.Now().Unix(),
 	}
+}
+
+// ConnectToAgent connects to an externally running Agent via HTTP
+func (am *AgentMonitor) ConnectToAgent(agentID uint64, addr string) error {
+	am.mu.Lock()
+	defer am.mu.Unlock()
+	if _, exists := am.clients[agentID]; exists {
+		return fmt.Errorf("[monitor %d]agent %d already connected", am.id, agentID)
+	}
+	baseURL := addr
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		baseURL = "http://" + addr
+	}
+
+	client := client.NewAgentClient(baseURL)
+
+	// Use new health check with monitor binding
+	_, err := client.HealthCheckWithMonitor(am.id)
+	if err != nil {
+		return fmt.Errorf("failed to connect to agent %d at %s: %w", agentID, addr, err)
+	}
+
+	am.clients[agentID] = client
+	log.Infof("[AgentMonitor] Connected to external Agent ID=%d at %s (Monitor ID=%d)",
+		agentID, addr, am.id)
+	return nil
+}
+
+// pkg/agent_monitor/agent_monitor.go
+type NodeSystemInfo struct {
+	NodeID       string                   `json:"node_id"`
+	CPUUsage     float64                  `json:"cpu_usage"`
+	MemUsage     float64                  `json:"mem_usage"`
+	ActiveAgents int32                    `json:"active_agents"`
+	Agents       []api.AgentRuntimeStatus `json:"agents"` // ← 新增
+	Timestamp    int64                    `json:"timestamp"`
+}
+
+func (am *AgentMonitor) GetNodeSystemInfo() *NodeSystemInfo {
+	// CPU/Mem 采集（保持不变）
+	cpu.Percent(0, false)
+	time.Sleep(100 * time.Millisecond)
+	cpuPerc, _ := cpu.Percent(0, false)
+	vmStat, _ := mem.VirtualMemory()
+
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+
+	// 收集所有 Agent 的运行时状态
+	var agents []api.AgentRuntimeStatus
+
+	// 1. 外部连接的 Agents (am.clients)
+	for agentID, client := range am.clients {
+		agents = append(agents, api.AgentRuntimeStatus{
+			AgentID: strconv.FormatUint(agentID, 10),
+			Phase:   "Connected",
+			Addr:    client.BaseURL(), // 需要添加这个方法
+		})
+	}
+	// 2. 本地启动的 Agents (am.agents) - 如果有实现的话
+	for _, agentInfo := range am.agents {
+		agents = append(agents, api.AgentRuntimeStatus{
+			AgentID: strconv.FormatUint(agentInfo.AgentID, 10),
+			Phase:   "Running",
+			Addr:    agentInfo.Addr,
+		})
+	}
+
+	return &NodeSystemInfo{
+		NodeID:       strconv.FormatUint(am.id, 10),
+		CPUUsage:     safePercent(cpuPerc[0]),
+		MemUsage:     safePercent(vmStat.UsedPercent),
+		ActiveAgents: int32(len(agents)),
+		Agents:       agents, // ← 新增字段
+		Timestamp:    time.Now().Unix(),
+	}
+}
+func safePercent(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 1.0
+	}
+	return v / 100.0
 }

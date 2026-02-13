@@ -1,5 +1,0 @@
-# monitor-config.yaml
-monitor_urls:
-  "1": "http://localhost:8081"
-  "2": "http://localhost:8082"
-  "3": "http://localhost:8083"

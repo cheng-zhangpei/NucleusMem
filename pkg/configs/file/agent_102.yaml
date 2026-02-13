@@ -1,0 +1,11 @@
+agent_id: 102
+agent_manager_addr: "http://localhost:8080"
+memspace_manager_addr: "http://localhost:7000"
+chat_server_addr: "http://localhost:20001"
+vector_server_addr: "http://localhost:5000"
+role: "JobAgent"
+image: "nucleus-agent:v1"
+path: "/usr/bin/agent"
+is_job: true
+http_addr: "localhost:9002"
+# Job Agent 通常不需要 MemSpace

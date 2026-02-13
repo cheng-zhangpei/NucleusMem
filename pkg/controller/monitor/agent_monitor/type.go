@@ -6,6 +6,7 @@ type LaunchAgentInternalRequest struct {
 	Image              string
 	BinPath            string
 	MountMemSpaceNames []string
+	HttpAddress        string
 	Env                map[string]string
 }
 

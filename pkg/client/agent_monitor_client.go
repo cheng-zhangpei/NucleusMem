@@ -61,7 +61,7 @@ func (c *AgentMonitorClient) LaunchAgent(ctx context.Context, req *api.LaunchAge
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := c.baseURL + "/api/v1/agents"
+	url := c.baseURL + "/api/v1/launch"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -98,8 +98,16 @@ func (c *AgentMonitorClient) LaunchAgent(ctx context.Context, req *api.LaunchAge
 
 // StopAgent 停止一个 Agent
 func (c *AgentMonitorClient) StopAgent(ctx context.Context, agentID uint64) (*api.StopAgentResponseHTTP, error) {
-	url := fmt.Sprintf("%s/api/v1/agents?agent_id=%d", c.baseURL, agentID)
-	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	url := fmt.Sprintf("%s/api/v1/monitor/destroy", c.baseURL)
+	// 发送 JSON body 而不是 query 参数
+	reqBody := map[string]uint64{"agent_id": agentID}
+	jsonData, _ := json.Marshal(reqBody)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -133,7 +141,7 @@ func (c *AgentMonitorClient) StopAgent(ctx context.Context, agentID uint64) (*ap
 
 // GetStatus 获取 Monitor 节点状态
 func (c *AgentMonitorClient) GetStatus(ctx context.Context) (*api.MonitorHeartbeatHTTP, error) {
-	url := c.baseURL + "/api/v1/status"
+	url := c.baseURL + "/api/v1/monitor/status"
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

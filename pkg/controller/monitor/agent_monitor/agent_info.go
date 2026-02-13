@@ -1,6 +1,6 @@
 package agent_monitor
 
 type AgentInfo struct {
-	agentId    uint64
-	httpServer string
+	AgentID uint64
+	Addr    string
 }

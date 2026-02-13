@@ -3,8 +3,7 @@ package agent_monitor
 import (
 	"NucleusMem/pkg/api"
 	"encoding/json"
-	"fmt"
-	"log"
+	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 )
 
@@ -24,7 +23,6 @@ func (s *AgentMonitorHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// 转换为 internal request
 	reqInternal := &LaunchAgentInternalRequest{
 		AgentID:            reqHTTP.AgentID,
 		Role:               reqHTTP.Role,
@@ -32,41 +30,21 @@ func (s *AgentMonitorHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *htt
 		BinPath:            reqHTTP.BinPath,
 		MountMemSpaceNames: reqHTTP.MountMemSpaceNames,
 		Env:                reqHTTP.Env,
+		HttpAddress:        reqHTTP.HttpAddr,
 	}
 
-	err := s.monitor.LaunchAgentInternal(reqInternal)
+	agentInfo, err := s.monitor.LaunchAgentInternal(reqInternal)
 	resp := api.LaunchAgentResponseHTTP{
 		Success: err == nil,
 	}
 	if err != nil {
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusBadRequest)
-	}
-
-	json.NewEncoder(w).Encode(resp)
-}
-
-// DELETE /api/v1/agents/{agent_id}
-func (s *AgentMonitorHTTPServer) handleStopAgent(w http.ResponseWriter, r *http.Request) {
-	// 从 URL 获取 agent_id（简单起见，用 query param 或 path var）
-	// 这里用 query: ?agent_id=123
-	agentIDStr := r.URL.Query().Get("agent_id")
-	if agentIDStr == "" {
-		http.Error(w, "Missing agent_id", http.StatusBadRequest)
-		return
-	}
-
-	var agentID uint64
-
-	fmt.Sscan(agentIDStr, &agentID)
-
-	err := s.monitor.StopAgent(agentID)
-	resp := api.StopAgentResponseHTTP{
-		Success: err == nil,
-	}
-	if err != nil {
-		resp.ErrorMessage = err.Error()
-		w.WriteHeader(http.StatusBadRequest)
+	} else {
+		// 返回新 Agent 信息
+		resp.AgentID = agentInfo.AgentID
+		resp.HttpAddr = agentInfo.Addr
+		resp.NodeID = s.monitor.id
 	}
 
 	json.NewEncoder(w).Encode(resp)
@@ -74,17 +52,54 @@ func (s *AgentMonitorHTTPServer) handleStopAgent(w http.ResponseWriter, r *http.
 
 // GET /api/v1/status
 func (s *AgentMonitorHTTPServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	info := s.monitor.GetNodeStatusInternal()
-	json.NewEncoder(w).Encode(info) // 假设 GetMonitorInfo 返回可 JSON 序列化的 struct
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	nodeInfo := s.monitor.GetNodeSystemInfo()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nodeInfo)
 }
 
-// Start 启动 HTTP 服务
+// pkg/agent_monitor/http_server.go
+// DELETE /api/v1/agents/{agent_id}
+
+func (s *AgentMonitorHTTPServer) handleStopAgent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		AgentID uint64 `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	err := s.monitor.StopAgent(req.AgentID)
+	resp := api.StopAgentResponseHTTP{
+		Success: err == nil,
+		AgentID: req.AgentID,
+	}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusNotFound)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
 func (s *AgentMonitorHTTPServer) Start() error {
-	addr := s.monitor.Config.MonitorUrl
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/agents", s.handleLaunchAgent)
-	mux.HandleFunc("DELETE /api/v1/agents", s.handleStopAgent)
-	mux.HandleFunc("GET /api/v1/status", s.handleStatus)
-	log.Printf("AgentMonitor HTTP server listening on %s", addr)
+	addr := s.monitor.Config.MonitorUrl
+	mux.HandleFunc("/api/v1/monitor/status", s.handleStatus)
+	mux.HandleFunc("/api/v1/monitor/launch", s.handleLaunchAgent)
+	mux.HandleFunc("/api/v1/monitor/destroy", s.handleStopAgent)
+
+	log.Infof("AgentMonitor HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

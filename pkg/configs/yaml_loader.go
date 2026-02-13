@@ -3,26 +3,12 @@ package configs
 import (
 	"bufio"
 	"fmt"
-	"github.com/ghodss/yaml"
+	"gopkg.in/yaml.v3" // ← 改用 v3
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 )
-
-// LoadAgentConfigFromYAML load the config from yaml file
-func LoadAgentConfigFromYAML(filePath string) (*AgentConfig, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	var config AgentConfig
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return nil, err
-	}
-	return &config, nil
-}
 
 // LoadMonitorConfigFromYAML load the MonitorConfig from yaml file
 func LoadMonitorConfigFromYAML(filePath string) (*MonitorConfig, error) {
@@ -92,4 +78,15 @@ func LoadAgentManagerConfigFromYAML(filePath string) (*AgentManagerConfig, error
 	}
 
 	return &AgentManagerConfig{MonitorURLs: monitorURLs}, nil
+}
+func LoadAgentConfigFromYAML(filePath string) (*AgentConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var config AgentConfig
+	err = yaml.Unmarshal(data, &config)
+
+	return &config, err
 }
