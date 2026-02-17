@@ -35,7 +35,7 @@ This system decouples agent memory from the reasoning process of large models, a
 
 1. **Dynamic State Binding & Context Switching**
 
-In traditional frameworks, an agent's memory is often bound to its process lifecycle. If the process dies, the memory is lost. In NucleusDB, an agent can dynamically **mount** a MemSpace at runtime.
+In traditional frameworks, an agent's memory is often bound to its process lifecycle. If the process dies, the memory is lost. In NucleusMem, an agent can dynamically **mount** a MemSpace at runtime.
 
 - **Context Switching**: A single agent runtime can switch between different personas (e.g., "Developer" vs. "Auditor") simply by unmounting one MemSpace and mounting another.
 - **State Inheritance**: When an agent scales up or migrates to a new node, it instantly inherits the complete historical context by attaching to the existing MemSpace, ensuring zero information loss.
@@ -55,11 +55,11 @@ In summary, **Memory as Service** transforms agent memory from an ephemeral, pro
 
 Traditional multi-agent systems typically rely on explicit peer-to-peer (P2P) messaging, which results in complex and fragile communication links. Introducing a dedicated network layer component to manage agent states within such a system would lead to a highly fragmented architecture, significantly increasing operational complexity and difficulty.
 
-Therefore, NucleusDB integrates the communication process directly into the **MemSpace** component, adopting a **"Store-and-Forward"** paradigm similar to a Blackboard architecture. Communication is no longer a transient network packet but a persistent state change. This approach naturally enables auditing, tracing, and time-travel debugging. To realize this vision, NucleusDB addresses three key challenges:
+Therefore, NucleusMem integrates the communication process directly into the **MemSpace** component, adopting a **"Store-and-Forward"** paradigm similar to a Blackboard architecture. Communication is no longer a transient network packet but a persistent state change. This approach naturally enables auditing, tracing, and time-travel debugging. To realize this vision, NucleusMem addresses three key challenges:
 
 **1. Message Flow Process: The Watcher Mechanism**
 
-Unlike traditional message queues that push data blindly, NucleusDB utilizes a storage-centric event loop.
+Unlike traditional message queues that push data blindly, NucleusMem utilizes a storage-centric event loop.
 
 - **Write-Driven Trigger**: When Agent A sends a message, it essentially performs a `Put` operation into a specific **Topic Area** (implemented via Key Prefixes) within the MemSpace.
 - **Reactive Dispatch**: A lightweight component called **Watcher** monitors these key changes. Upon detecting a new entry, the Watcher retrieves the content and pushes the signal (e.g., the Message Key) to the subscribers' in-memory channels.
@@ -77,7 +77,7 @@ Routing decisions are offloaded from the infrastructure to the agents themselves
 
 **3. Communication Traceability and Audit**
 
-Since every communication action is fundamentally a storage transaction, NucleusDB provides native auditability without additional overhead.
+Since every communication action is fundamentally a storage transaction, NucleusMem provides native auditability without additional overhead.
 
 - **Persistence**: All chat histories are persisted as KV pairs (e.g., `Topic/Timestamp/SenderID`). This allows the system to reconstruct the entire conversation flow even after a cluster restart.
 - **Time-Travel Debugging**: Utilizing the underlying MVCC (Multi-Version Concurrency Control) mechanism, developers can query the state of the communication channel at any specific timestamp `T`. This is critical for diagnosing "hallucinations" or logical errors in multi-agent collaborations, as it allows replaying the exact inputs an agent received at a past moment.
