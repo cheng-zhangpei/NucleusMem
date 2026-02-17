@@ -4,10 +4,14 @@ import (
 	"NucleusMem/pkg/api"
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
+	"encoding/json"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
+	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,9 +23,10 @@ type AgentMonitor struct {
 	Config *configs.MonitorConfig
 
 	// 状态保护
-	mu      sync.RWMutex
-	agents  map[string]*AgentInfo
-	clients map[uint64]*client.AgentClient // For connected external agents
+	mu                 sync.RWMutex
+	agents             map[string]*api.AgentInfo
+	clients            map[uint64]*client.AgentClient // For connected external agents
+	agentManagerClient *client.AgentManagerClient
 	// todo(cheng) WAL日志的思路，记录agent所绑定的memspace，这个做法是用于故障恢复，agent在绑定之前需要同步在monitor中更新缓存
 }
 
@@ -35,11 +40,12 @@ type AgentMonitorInfo struct {
 }
 
 func NewAgentMonitor(config *configs.MonitorConfig) *AgentMonitor {
+	managerClient := client.NewAgentManagerClient(config.AgentManagerUrl)
 	return &AgentMonitor{
-		Config:  config,
-		agents:  make(map[string]*AgentInfo),
-		clients: make(map[uint64]*client.AgentClient), // Initialize client registry
-
+		Config:             config,
+		agents:             make(map[string]*api.AgentInfo),
+		clients:            make(map[uint64]*client.AgentClient), // Initialize client registry
+		agentManagerClient: managerClient,
 	}
 }
 
@@ -95,34 +101,64 @@ func (am *AgentMonitor) GetMonitorInfo() *AgentMonitorInfo {
 	}
 }
 
-func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) (*AgentInfo, error) {
+func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) (*api.AgentInfo, error) {
+	// Step 1: 加载 Agent 配置文件
+	agentCfg, err := configs.LoadAgentConfigFromYAML(req.ConfigFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load agent config from %s: %w", req.ConfigFilePath, err)
+	}
+
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
-	agentKey := strconv.FormatUint(req.AgentID, 10)
+	agentKey := strconv.FormatUint(agentCfg.AgentId, 10)
 	if _, exists := am.agents[agentKey]; exists {
-		return nil, fmt.Errorf("agent %s is already running", agentKey)
+		return nil, fmt.Errorf("agent %d is already running", agentCfg.AgentId)
 	}
 
-	log.Infof("[agent_monitor] Launching Agent ID=%d, Role=%s", req.AgentID, req.Role)
+	log.Infof("[agent_monitor] Launching Agent ID=%d using config: %s", agentCfg.AgentId, req.ConfigFilePath)
 
-	agentConfig := &configs.AgentConfig{
-		AgentId:  req.AgentID,
-		Role:     req.Role,
-		Image:    req.Image,
-		Path:     req.BinPath,
-		HttpAddr: req.HttpAddress,
+	// Step 2: 启动 Agent 进程
+	cmd := exec.Command(req.BinPath, "--config", req.ConfigFilePath)
+
+	if req.Env != nil {
+		cmd.Env = os.Environ()
+		for k, v := range req.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
 	}
 
-	agentClient := client.NewAgentClient(agentConfig.HttpAddr)
-	am.clients[req.AgentID] = agentClient
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	agentInfo := &AgentInfo{
-		AgentID: req.AgentID,
-		Addr:    req.HttpAddress,
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start agent process: %w", err)
+	}
+
+	// Step 3: 等待启动
+	time.Sleep(800 * time.Millisecond)
+
+	// Step 4: 从配置文件中获取 HTTP 地址，创建客户端
+	httpAddr := agentCfg.HttpAddr
+	if !strings.HasPrefix(httpAddr, "http://") && !strings.HasPrefix(httpAddr, "https://") {
+		httpAddr = "http://" + httpAddr
+	}
+
+	agentClient := client.NewAgentClient(httpAddr)
+	_, err = agentClient.HealthCheckWithMonitor(am.id)
+	if err != nil {
+		log.Warnf("Agent %d health check failed: %v", agentCfg.AgentId, err)
+	}
+
+	// Step 5: 注册到 Monitor
+	am.clients[agentCfg.AgentId] = agentClient
+	agentInfo := &api.AgentInfo{
+		AgentID: agentCfg.AgentId,
+		Addr:    agentCfg.HttpAddr,
 	}
 	am.agents[agentKey] = agentInfo
 
+	log.Infof("[agent_monitor] Successfully launched Agent %d at %s", agentCfg.AgentId, agentCfg.HttpAddr)
 	return agentInfo, nil
 }
 
@@ -245,6 +281,61 @@ func (am *AgentMonitor) GetNodeSystemInfo() *NodeSystemInfo {
 		Agents:       agents, // ← 新增字段
 		Timestamp:    time.Now().Unix(),
 	}
+}
+
+// pkg/agent_monitor/agent_monitor.go
+func (am *AgentMonitor) notifyAgentManager() {
+	if am.agentManagerClient == nil {
+		return // 未配置
+	}
+
+	status := am.GetNodeSystemInfo()
+	update := api.MonitorStatusUpdate{
+		NodeID:       am.id,
+		CPUUsage:     status.CPUUsage,
+		MemUsage:     status.MemUsage,
+		ActiveAgents: status.ActiveAgents,
+		Agents:       status.Agents,
+		Timestamp:    status.Timestamp,
+	}
+	am.agentManagerClient.SendStatusUpdate(update)
+}
+
+// POST /api/v1/agents/connect
+func (s *AgentMonitorHTTPServer) handleConnectAgent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req api.ConnectAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.AgentID == 0 {
+		http.Error(w, "agent_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.Addr == "" {
+		http.Error(w, "addr is required", http.StatusBadRequest)
+		return
+	}
+
+	err := s.monitor.ConnectToAgent(req.AgentID, req.Addr)
+	resp := struct {
+		Success      bool   `json:"success"`
+		ErrorMessage string `json:"error_message,omitempty"`
+	}{
+		Success: err == nil,
+	}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusBadRequest)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 func safePercent(v float64) float64 {
 	if v < 0 {

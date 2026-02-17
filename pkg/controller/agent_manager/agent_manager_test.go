@@ -2,7 +2,6 @@ package agent_manager
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 
@@ -54,11 +53,11 @@ func TestAgentManager_IntegrationWithRealMonitors(t *testing.T) {
 				MountMemSpaceNames: []string{"shared-test"},
 			}
 
-			err := am.LaunchAgentOnNode(ctx, nodeID, req)
+			_, err := am.LaunchAgentOnNode(ctx, nodeID, req)
 			require.NoError(t, err, "LaunchAgent should succeed")
 
 			// 验证 cache 是否更新（可选）
-			info, ok := am.agentCache.GetAgent(strconv.FormatUint(req.AgentID, 10))
+			info, ok := am.agentCache.GetAgent(req.AgentID)
 			if ok {
 				assert.Equal(t, "Running", info.Status)
 			}

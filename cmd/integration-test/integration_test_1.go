@@ -1,5 +1,5 @@
 // cmd/integration-test/monitor_connect_test.go
-package main
+package test
 
 import (
 	"NucleusMem/pkg/controller/agent_manager"

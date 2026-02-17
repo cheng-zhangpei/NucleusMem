@@ -5,11 +5,13 @@ package api
 type LaunchAgentRequestHTTP struct {
 	AgentID            uint64            `json:"agent_id"`
 	Role               string            `json:"role"`
-	Image              string            `json:"image,omitempty"`      // Docker 镜像
-	BinPath            string            `json:"bin_path,omitempty"`   // 二进制路径
-	MountMemSpaceNames []string          `json:"mount_memspace_names"` // 要挂载的 MemSpace 名称列表
-	Env                map[string]string `json:"env,omitempty"`        // 环境变量注入
-	HttpAddr           string            `json:"http_addr,omitempty"`  // 环境变量注入
+	Image              string            `json:"image,omitempty"`            // Docker 镜像
+	BinPath            string            `json:"bin_path,omitempty"`         // 二进制路径
+	MountMemSpaceNames []string          `json:"mount_memspace_names"`       // 要挂载的 MemSpace 名称列表
+	Env                map[string]string `json:"env,omitempty"`              // 环境变量注入
+	HttpAddr           string            `json:"http_addr,omitempty"`        // 环境变量注入
+	ConfigFilePath     string            `json:"config_file_path,omitempty"` // 环境变量注入
+	IsJob              bool              `json:"is_job,omitempty"`
 }
 
 // LaunchAgentResponseHTTP 是 HTTP 返回体
@@ -48,4 +50,24 @@ type AgentRuntimeStatus struct {
 	StartTime    int64  `json:"start_time"`
 	RestartCount int32  `json:"restart_count"`
 	Addr         string `json:"addr,omitempty"`
+}
+type MonitorStatusUpdate struct {
+	NodeID       uint64               `json:"node_id"`
+	CPUUsage     float64              `json:"cpu_usage"`
+	MemUsage     float64              `json:"mem_usage"`
+	ActiveAgents int32                `json:"active_agents"`
+	Agents       []AgentRuntimeStatus `json:"agents"`
+	Timestamp    int64                `json:"timestamp"`
+}
+
+// ConnectAgentRequest represents the request to connect an external agent
+type ConnectAgentRequest struct {
+	AgentID uint64 `json:"agent_id"`
+	Addr    string `json:"addr"` // e.g., "localhost:9001"
+}
+
+// ConnectAgentResponse matches server response structure
+type ConnectAgentResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }

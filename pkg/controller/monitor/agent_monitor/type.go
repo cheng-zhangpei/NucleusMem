@@ -8,6 +8,7 @@ type LaunchAgentInternalRequest struct {
 	MountMemSpaceNames []string
 	HttpAddress        string
 	Env                map[string]string
+	ConfigFilePath     string
 }
 
 // 内部状态结构（仅在 monitor 包内使用）

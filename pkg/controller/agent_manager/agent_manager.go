@@ -83,17 +83,17 @@ func (*AgentManager) BingMemSpace() error {
 	return nil
 }
 
-func (am *AgentManager) LaunchAgentOnNode(ctx context.Context, nodeID uint64, req *api.LaunchAgentRequestHTTP) error {
+func (am *AgentManager) LaunchAgentOnNode(ctx context.Context, nodeID uint64, req *api.LaunchAgentRequestHTTP) (*AgentInfo, error) {
 	monitorClient, ok := am.agentMonitorClient[nodeID]
 	if !ok {
-		return fmt.Errorf("no client for node %d", nodeID)
+		return nil, fmt.Errorf("no client for node %d", nodeID)
 	}
 	resp, err := monitorClient.LaunchAgent(ctx, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !resp.Success {
-		return fmt.Errorf("launch failed: %s", resp.ErrorMessage)
+		return nil, fmt.Errorf("launch failed: %s", resp.ErrorMessage)
 	}
 
 	// 获取 Monitor 地址
@@ -101,16 +101,17 @@ func (am *AgentManager) LaunchAgentOnNode(ctx context.Context, nodeID uint64, re
 	if !exists {
 		nodeAddr = "unknown"
 	}
-	am.agentCache.UpdateAgent(&AgentInfo{
+	agentInfo := &AgentInfo{
 		AgentID:  resp.AgentID, // uint64
 		Status:   "Running",
 		NodeID:   nodeID,        // uint64
 		NodeAddr: nodeAddr,      // string
 		HTTPAddr: resp.HttpAddr, // string
-	})
+	}
+	am.agentCache.UpdateAgent(agentInfo)
 
 	log.Infof("[agent_manager] Launched Agent %d on Node %d", resp.AgentID, nodeID)
-	return nil
+	return agentInfo, nil
 }
 
 func (am *AgentManager) StopAgentOnNode(ctx context.Context, nodeID uint64, agentID uint64) error {
@@ -156,6 +157,30 @@ func (am *AgentManager) DisplayCache() {
 			a.NodeAddr,
 			a.HTTPAddr,
 		)
+	}
+}
+
+// pkg/controller/agent_manager/agent_manager.go
+func (am *AgentManager) getMonitorAddr(nodeID uint64) string {
+	if addr, ok := am.monitorURLs[nodeID]; ok {
+		return addr
+	}
+	return "unknown"
+}
+func (am *AgentManager) syncCacheWithUpdate(update api.MonitorStatusUpdate) {
+	// 构建活跃 Agent ID 集合
+	activeIDs := make(map[uint64]bool)
+	for _, a := range update.Agents {
+		if id, err := strconv.ParseUint(a.AgentID, 10, 64); err == nil {
+			activeIDs[id] = true
+		}
+	}
+	// 清理已消失的 Agent
+	allAgents := am.agentCache.GetAllAgents()
+	for _, agent := range allAgents {
+		if agent.NodeID == update.NodeID && !activeIDs[agent.AgentID] {
+			am.agentCache.RemoveAgent(agent.AgentID)
+		}
 	}
 }
 

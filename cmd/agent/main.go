@@ -1,17 +1,28 @@
-// cmd/agent/main.go
+// Package main is the entry point for the NucleusMem Agent
 package main
 
 import (
-	"NucleusMem/pkg/runtime/agent"
+	"flag"
 	"fmt"
 	"os"
-	"sync"
 
 	"NucleusMem/pkg/configs"
+	"NucleusMem/pkg/runtime/agent"
 	"github.com/pingcap-incubator/tinykv/log"
 )
 
 func main() {
+	// Define command-line flag
+	configPath := flag.String("config", "", "Path to agent configuration file (required)")
+	flag.Parse()
+
+	// Validate required flag
+	if *configPath == "" {
+		fmt.Println("Error: --config flag is required")
+		fmt.Println("Usage: agent --config /path/to/agent-config.yaml")
+		os.Exit(1)
+	}
+
 	// Print working directory
 	if wd, err := os.Getwd(); err != nil {
 		fmt.Printf("Failed to get working directory: %v\n", err)
@@ -19,46 +30,25 @@ func main() {
 		fmt.Printf("🔧 Current working directory: %s\n", wd)
 	}
 
-	// List of agent config files (for testing)
-	configFiles := []string{
-		"./pkg/configs/file/agent_101.yaml",
-		"./pkg/configs/file/agent_102.yaml",
-		"./pkg/configs/file/agent_103.yaml",
-		"./pkg/configs/file/agent_104.yaml",
+	// Load agent configuration
+	cfg, err := configs.LoadAgentConfigFromYAML(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load config from %s: %v", *configPath, err)
 	}
 
-	var wg sync.WaitGroup
-
-	for _, configFile := range configFiles {
-		wg.Add(1)
-		go func(cfgFile string) {
-			defer wg.Done()
-
-			// Load config
-			cfg, err := configs.LoadAgentConfigFromYAML(cfgFile)
-			if err != nil {
-				log.Errorf("Failed to load config %s: %v", cfgFile, err)
-				return
-			}
-
-			// Create agent instance
-			agt, err := agent.NewAgent(cfg)
-			if err != nil {
-				log.Errorf("Failed to create agent from %s: %v", cfgFile, err)
-				return
-			}
-
-			// Start HTTP server
-			server := agent.NewAgentHTTPServer(agt)
-			log.Infof("🤖 Starting Agent (ID=%d, Job=%v) on %s", cfg.AgentId, cfg.IsJob, cfg.HttpAddr)
-
-			// This blocks the goroutine, but that's fine for demo
-			if err := server.Start(cfg.HttpAddr); err != nil {
-				log.Errorf("Agent %d server failed: %v", cfg.AgentId, err)
-			}
-		}(configFile)
+	// Create agent instance
+	agt, err := agent.NewAgent(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create agent: %v", err)
 	}
 
-	log.Infof("🚀 All 4 agents started! Press Ctrl+C to stop.")
-	wg.Wait()
+	// Start HTTP server
+	server := agent.NewAgentHTTPServer(agt)
+	log.Infof("🤖 Starting Agent (ID=%d, Role=%s, Job=%v) on %s",
+		cfg.AgentId, cfg.Role, cfg.IsJob, cfg.HttpAddr)
+
+	// This blocks until server stops
+	if err := server.Start(cfg.HttpAddr); err != nil {
+		log.Fatalf("Agent server failed: %v", err)
+	}
 }

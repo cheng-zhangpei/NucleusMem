@@ -1,17 +1,12 @@
 package configs
 
 import (
-	"bufio"
-	"fmt"
 	"gopkg.in/yaml.v3" // ← 改用 v3
 	"os"
-	"regexp"
-	"strconv"
-	"strings"
 )
 
-// LoadMonitorConfigFromYAML load the MonitorConfig from yaml file
-func LoadMonitorConfigFromYAML(filePath string) (*MonitorConfig, error) {
+// LoadAgentMonitorConfig load the MonitorConfig from yaml file
+func LoadAgentMonitorConfigFromYAML(filePath string) (*MonitorConfig, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
@@ -31,53 +26,62 @@ type agentManagerRawConfig struct {
 }
 
 func LoadAgentManagerConfigFromYAML(filePath string) (*AgentManagerConfig, error) {
-	file, err := os.Open(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
-	monitorURLs := make(map[uint64]string)
-	inMonitorSection := false
+	var config AgentManagerConfig
+	err = yaml.Unmarshal(data, &config)
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		if line == "monitor_urls:" {
-			inMonitorSection = true
-			continue
-		}
-
-		if inMonitorSection {
-			// 匹配: "1": "localhost:8081"
-			// 或:   1: localhost:8081 （无引号）
-			re := regexp.MustCompile(`^["']?(\d+)["']?\s*:\s*["']?([a-zA-Z0-9.:\-_]+)["']?$`)
-			matches := re.FindStringSubmatch(line)
-			if matches != nil {
-				id, err := strconv.ParseUint(matches[1], 10, 64)
-				if err != nil {
-					continue // 跳过无效 ID
-				}
-				hostPort := matches[2]
-				monitorURLs[id] = hostPort
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(monitorURLs) == 0 {
-		return nil, fmt.Errorf("no monitor URLs found in %s", filePath)
-	}
-
-	return &AgentManagerConfig{MonitorURLs: monitorURLs}, nil
+	return &config, err
+	//file, err := os.Open(filePath)
+	//if err != nil {
+	//	return nil, err
+	//}
+	//defer file.Close()
+	//
+	//monitorURLs := make(map[uint64]string)
+	//inMonitorSection := false
+	//
+	//scanner := bufio.NewScanner(file)
+	//for scanner.Scan() {
+	//	line := strings.TrimSpace(scanner.Text())
+	//
+	//	if line == "" || strings.HasPrefix(line, "#") {
+	//		continue
+	//	}
+	//
+	//	if line == "monitor_urls:" {
+	//		inMonitorSection = true
+	//		continue
+	//	}
+	//
+	//	if inMonitorSection {
+	//		// 匹配: "1": "localhost:8081"
+	//		// 或:   1: localhost:8081 （无引号）
+	//		re := regexp.MustCompile(`^["']?(\d+)["']?\s*:\s*["']?([a-zA-Z0-9.:\-_]+)["']?$`)
+	//		matches := re.FindStringSubmatch(line)
+	//		if matches != nil {
+	//			id, err := strconv.ParseUint(matches[1], 10, 64)
+	//			if err != nil {
+	//				continue // 跳过无效 ID
+	//			}
+	//			hostPort := matches[2]
+	//			monitorURLs[id] = hostPort
+	//		}
+	//	}
+	//}
+	//
+	//if err := scanner.Err(); err != nil {
+	//	return nil, err
+	//}
+	//
+	//if len(monitorURLs) == 0 {
+	//	return nil, fmt.Errorf("no monitor URLs found in %s", filePath)
+	//}
+	//
+	//return &AgentManagerConfig{MonitorURLs: monitorURLs}, nil
 }
 func LoadAgentConfigFromYAML(filePath string) (*AgentConfig, error) {
 	data, err := os.ReadFile(filePath)
@@ -89,4 +93,17 @@ func LoadAgentConfigFromYAML(filePath string) (*AgentConfig, error) {
 	err = yaml.Unmarshal(data, &config)
 
 	return &config, err
+}
+func LoadMemSpaceManagerConfigFromYAML(filePath string) (*MemSpaceManagerConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var config MemSpaceManagerConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }

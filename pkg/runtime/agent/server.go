@@ -20,31 +20,28 @@ func NewAgentHTTPServer(agent *Agent) *AgentHTTPServer {
 	return &AgentHTTPServer{agent: agent}
 }
 
-// POST /api/v1/chat/temp
-// Handles temporary chat requests that use in-memory context only
 func (s *AgentHTTPServer) handleTempChat(w http.ResponseWriter, r *http.Request) {
 	var req api.TempChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-
-	response, err := s.agent.TempChat(req.Message)
-	resp := api.TempChatResponse{
-		Success: err == nil,
+	// Submit as TempChat task
+	task := AgentTask{
+		Type:    TaskTypeTempChat,
+		Content: req.Message,
 	}
-	if err != nil {
-		resp.ErrorMessage = err.Error()
-		w.WriteHeader(http.StatusInternalServerError)
-	} else {
-		resp.Response = response
+	if err := s.agent.SubmitTask(task); err != nil {
+		http.Error(w, "Failed to submit task", http.StatusInternalServerError)
+		return
 	}
 
+	// Immediate ack (async processing)
+	resp := api.TempChatResponse{Success: true}
 	json.NewEncoder(w).Encode(resp)
 }
 
-// POST /api/v1/chat
-// Handles persistent chat requests that interact with MemSpace (future implementation)
+// POST /api/v1/agent/chat
 func (s *AgentHTTPServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req api.ChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -52,17 +49,39 @@ func (s *AgentHTTPServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO(cheng): Implement persistent chat with MemSpace integration
-	response, err := s.agent.Chat(req.Message)
-	resp := api.ChatResponse{
-		Success: err == nil,
+	// Submit as Chat task
+	task := AgentTask{
+		Type:    TaskTypeChat,
+		Content: req.Message,
 	}
-	if err != nil {
-		resp.ErrorMessage = err.Error()
-		w.WriteHeader(http.StatusInternalServerError)
-	} else {
-		resp.Response = response
+	if err := s.agent.SubmitTask(task); err != nil {
+		http.Error(w, "Failed to submit task", http.StatusInternalServerError)
+		return
 	}
+
+	resp := api.ChatResponse{Success: true}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/agent/notify
+func (s *AgentHTTPServer) handleNotify(w http.ResponseWriter, r *http.Request) {
+	var req api.NotifyRequest // ← 你需要定义这个结构
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Submit as Comm task
+	task := AgentTask{
+		Type:    TaskTypeComm,
+		Key:     req.Key,
+		Content: req.Content,
+	}
+	if err := s.agent.SubmitTask(task); err != nil {
+		http.Error(w, "Failed to submit notify task", http.StatusInternalServerError)
+		return
+	}
+	resp := api.NotifyResponse{Success: true}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -123,6 +142,7 @@ func (s *AgentHTTPServer) Start(addr string) error {
 	mux.HandleFunc("/api/v1/agent/chat", s.handleChat)
 	mux.HandleFunc("/api/v1/agent/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/agent/shutdown", s.handleShutdown)
+	mux.HandleFunc("/api/v1/agent/notify", s.handleNotify)
 
 	log.Infof("Agent HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)

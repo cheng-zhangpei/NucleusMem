@@ -61,7 +61,7 @@ func (c *AgentMonitorClient) LaunchAgent(ctx context.Context, req *api.LaunchAge
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := c.baseURL + "/api/v1/launch"
+	url := c.baseURL + "/api/v1/monitor/launch"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -164,4 +164,50 @@ func (c *AgentMonitorClient) GetStatus(ctx context.Context) (*api.MonitorHeartbe
 	}
 
 	return &status, nil
+}
+
+// ConnectAgent connects to an external agent via Monitor's HTTP API
+func (c *AgentMonitorClient) ConnectAgent(ctx context.Context, agentID uint64, addr string) error {
+	req := api.ConnectAgentRequest{
+		AgentID: agentID,
+		Addr:    addr,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal connect request: %w", err)
+	}
+
+	url := c.baseURL + "/api/v1/agents/connect"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("connect agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+
+	var httpResponse api.ConnectAgentResponse
+	if err := json.Unmarshal(respBody, &httpResponse); err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if !httpResponse.Success {
+		msg := httpResponse.ErrorMessage
+		if msg == "" {
+			msg = string(respBody)
+		}
+		return fmt.Errorf("connect agent failed: %s (status=%d)", msg, resp.StatusCode)
+	}
+
+	return nil
 }

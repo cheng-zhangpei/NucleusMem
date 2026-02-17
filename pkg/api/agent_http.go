@@ -38,3 +38,13 @@ type AgentHealthResponse struct {
 type ShutdownResponse struct {
 	Success bool `json:"success"`
 }
+type NotifyRequest struct {
+	Key      string            `json:"key,omitempty"`     // e.g., "memory/101/5"
+	Content  string            `json:"content,omitempty"` // direct content
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type NotifyResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}

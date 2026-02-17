@@ -1,0 +1,3 @@
+# MemSpaceMonitor Configuration for Node 2
+node_id: 2
+monitor_url: "localhost:9082"

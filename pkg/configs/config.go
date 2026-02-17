@@ -23,10 +23,28 @@ type MemSpaceInfo struct {
 
 // AgentManagerConfig AgentManager 的启动配置
 type AgentManagerConfig struct {
+	HttpAddr    string            `yaml:"http_addr"`
 	MonitorURLs map[uint64]string `yaml:"monitor_urls"` // nodeID -> http://host:port
 }
 
 type MonitorConfig struct {
+	NodeID          uint64 `yaml:"node_id"`
+	MonitorUrl      string `yaml:"monitor_url"`
+	AgentManagerUrl string `yaml:"agent_manager_url"`
+}
+
+// MemSpaceManagerConfig holds configuration for MemSpaceManager
+type MemSpaceManagerConfig struct {
+	// MonitorURLs maps NodeID to MemSpaceMonitor HTTP addresses
+	// Example: {1: "localhost:9081", 2: "localhost:9082"}
+	MonitorURLs map[uint64]string `yaml:"monitor_urls"`
+
+	// ListenAddr is the address where MemSpaceManager HTTP server listens
+	ListenAddr string `yaml:"listen_addr"`
+}
+
+// MemSpaceMonitorConfig holds configuration for MemSpaceMonitor
+type MemSpaceMonitorConfig struct {
 	NodeID     uint64 `yaml:"node_id"`
-	MonitorUrl string `yaml:"monitor_url"`
+	MonitorUrl string `yaml:"monitor_url"` // HTTP server address
 }

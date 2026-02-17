@@ -31,6 +31,7 @@ func (s *AgentMonitorHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *htt
 		MountMemSpaceNames: reqHTTP.MountMemSpaceNames,
 		Env:                reqHTTP.Env,
 		HttpAddress:        reqHTTP.HttpAddr,
+		ConfigFilePath:     reqHTTP.ConfigFilePath,
 	}
 
 	agentInfo, err := s.monitor.LaunchAgentInternal(reqInternal)
@@ -99,6 +100,7 @@ func (s *AgentMonitorHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/monitor/status", s.handleStatus)
 	mux.HandleFunc("/api/v1/monitor/launch", s.handleLaunchAgent)
 	mux.HandleFunc("/api/v1/monitor/destroy", s.handleStopAgent)
+	mux.HandleFunc("/api/v1/monitor/connect", s.handleConnectAgent)
 
 	log.Infof("AgentMonitor HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)

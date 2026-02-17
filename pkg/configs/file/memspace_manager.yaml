@@ -1,0 +1,7 @@
+# MemSpaceManager Configuration
+listen_addr: "localhost:9080"
+# Monitor nodes that manage MemSpaces
+monitor_urls:
+  "1": "localhost:9081"  # MemSpaceMonitor on Node 1
+  "2": "localhost:9082"  # MemSpaceMonitor on Node 2
+  "3": "localhost:9083"  # MemSpaceMonitor on Node 3

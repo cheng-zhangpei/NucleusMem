@@ -1,1 +1,3 @@
-http_addr: ":8081"
+node_id: 1
+monitor_url: "localhost:8081"
+agent_manager_url: "localhost:7007"
