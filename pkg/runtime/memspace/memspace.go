@@ -3,9 +3,11 @@ package memspace
 
 import (
 	"NucleusMem/pkg/client"
-	"NucleusMem/pkg/runtime/memspace/region"
+	"NucleusMem/pkg/configs"
+	memspace_region "NucleusMem/pkg/runtime/memspace/region"
 	"NucleusMem/pkg/storage/tinykv-client"
 	"context"
+	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pkg/errors"
 	"strconv"
@@ -87,7 +89,7 @@ func NewMemSpace(
 		workerCancel:     cancel,
 		chatServer:       chatServerClient,
 		MemoryRegion:     memspace_region.NewMemoryRegion(kvClient, idUint64, serverClient),
-		CommRegion:       memspace_region.NewCommRegion(kvClient),
+		CommRegion:       memspace_region.NewCommRegion(kvClient, idUint64),
 		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, idUint64),
 	}
 
@@ -104,6 +106,36 @@ func (m *MemSpace) WriteMemory(memory string, agentId uint64) error {
 	return m.MemoryRegion.Write(agentId, memory)
 }
 
+// GetMemoryContext retrieves combined context from Summary and Memory regions
+// - summaryBefore: get latest summary before this timestamp
+// - query: semantic search query
+// - n: number of similar memories to retrieve
+func (m *MemSpace) GetMemoryContext(summaryBefore int64, query string, n int) (summary string, memories []string, err error) {
+	// 1. Get latest summary before timestamp
+	summaryRecords, err := m.SummaryRegion.GetBefore(summaryBefore)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get summaries: %w", err)
+	}
+	var latestSummary string
+	if len(summaryRecords) > 0 {
+		// Assume records are sorted by timestamp (or find max)
+		latest := summaryRecords[0]
+		for _, s := range summaryRecords {
+			if s.Timestamp > latest.Timestamp {
+				latest = s
+			}
+		}
+		latestSummary = latest.Content
+	}
+	// 2. Search top-n similar memories
+	memories, err = m.MemoryRegion.Search(query, n)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to search memories: %w", err)
+	}
+	return latestSummary, memories, nil
+}
+
+// todo this will move the monitor (worker poll arch)
 // startSummaryWorker launches a background goroutine for auto-summarization
 func (m *MemSpace) startSummaryWorker() {
 	m.workerWG.Add(1)
@@ -143,7 +175,7 @@ func (m *MemSpace) trySummarize() {
 	for _, rec := range batch {
 		contents = append(contents, rec.Content)
 		sourceIDs = append(sourceIDs, rec.ID)
-		seq := memspace_region.ParseSeqFromKey(rec.ID)
+		seq := configs.ParseMemSeqFromKey(rec.ID)
 		if seq > maxSeq {
 			maxSeq = seq
 		}
@@ -160,6 +192,18 @@ func (m *MemSpace) trySummarize() {
 	// Step 3: Update last processed sequence
 	m.lastSummarizedSeq = maxSeq
 	log.Infof("the summary record has been added to the summary region,lastIndex :%d", m.lastSummarizedSeq)
+}
+func (m *MemSpace) RegisterAgent(agentID uint64, addr, role string) error {
+	return m.CommRegion.RegisterAgent(agentID, addr, role)
+}
+func (m *MemSpace) UnRegisterAgent(agentID uint64) error {
+	return m.CommRegion.UnregisterAgent(agentID)
+}
+func (m *MemSpace) SendMessage(fromAgent, toAgent uint64, key, refType string) error {
+	return m.CommRegion.SendMessage(fromAgent, toAgent, key, refType)
+}
+func (m *MemSpace) ListAgents() []memspace_region.AgentRegistryEntry {
+	return m.CommRegion.ListAgents()
 }
 func (m *MemSpace) Stop() {
 	m.workerCancel()

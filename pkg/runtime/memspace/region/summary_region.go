@@ -2,6 +2,7 @@
 package memspace_region
 
 import (
+	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/storage"
 	"encoding/binary"
 	"encoding/json"
@@ -57,7 +58,7 @@ func (sr *SummaryRegion) Add(summary *SummaryRecord) error {
 		return err
 	}
 
-	rawKey := EncodeKey(ZoneSummary, sr.memSpaceID, []byte(summary.ID))
+	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(summary.ID))
 	return sr.kvClient.Update(func(txn storage.Transaction) error {
 		return txn.Put(rawKey, data)
 	})
@@ -74,7 +75,7 @@ func (sr *SummaryRegion) Get(id string) (*SummaryRecord, bool) {
 	sr.mu.RUnlock()
 
 	// Load from storage
-	rawKey := EncodeKey(ZoneSummary, sr.memSpaceID, []byte(id))
+	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(id))
 	var record SummaryRecord
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
@@ -96,9 +97,8 @@ func (sr *SummaryRegion) Get(id string) (*SummaryRecord, bool) {
 
 // GetAll loads all summaries for this MemSpace
 func (sr *SummaryRegion) GetAll() ([]*SummaryRecord, error) {
-	prefix := GetScanPrefix(ZoneSummary, sr.memSpaceID)
+	prefix := configs.GetScanPrefix(configs.ZoneSummary, sr.memSpaceID)
 	var records []*SummaryRecord
-
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
 		if err != nil {
@@ -178,26 +178,9 @@ func (sr *SummaryRegion) GenerateSummary(contents []string, sourceIDs []string) 
 	}, nil
 }
 
-// recoverSeq recovers the max sequence number from existing summaries (optional)
-func (sr *SummaryRegion) recoverSeq() {
-	// Simple: scan all and find max seq in "summary/{seq}"
-	all, _ := sr.GetAll()
-	var maxSeq uint64
-	for _, s := range all {
-		if len(s.ID) > 8 && s.ID[:8] == "summary/" {
-			if seq, err := fmt.Sscanf(s.ID, "summary/%d", &maxSeq); err == nil && seq == 1 {
-				if maxSeq >= sr.seq {
-					sr.seq = maxSeq
-				}
-			}
-		}
-	}
-	sr.seq++ // next will be seq+1
-}
-
 // loadSummarySeq loads the next sequence number for summaries
 func (sr *SummaryRegion) loadSummarySeq() (uint64, error) {
-	rawKey := EncodeKey(ZoneSummary, sr.memSpaceID, []byte(SummarySeqKey))
+	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(SummarySeqKey))
 	var seq uint64 = 1
 
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
@@ -213,7 +196,7 @@ func (sr *SummaryRegion) loadSummarySeq() (uint64, error) {
 
 // saveSummarySeq saves the current sequence number
 func (sr *SummaryRegion) saveSummarySeq(seq uint64) error {
-	rawKey := EncodeKey(ZoneSummary, sr.memSpaceID, []byte(SummarySeqKey))
+	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(SummarySeqKey))
 	data := make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, seq)
 	return sr.kvClient.Update(func(txn storage.Transaction) error {

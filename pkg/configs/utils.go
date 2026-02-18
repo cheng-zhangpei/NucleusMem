@@ -1,4 +1,4 @@
-package memspace_region
+package configs
 
 import (
 	"encoding/binary"
@@ -89,7 +89,7 @@ func GetScanPrefix(zone ZonePrefix, memSpaceID uint64) []byte {
 
 	return buf
 }
-func ParseSeqFromKey(key string) uint64 {
+func ParseMemSeqFromKey(key string) uint64 {
 	parts := strings.Split(key, "/")
 	// Expected format: ["memory", "101", "5"]
 	if len(parts) != 3 {

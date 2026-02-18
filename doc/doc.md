@@ -125,8 +125,8 @@ To manage resources across a distributed cluster (before fully transitioning to 
 
 ![cluster_arch](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/distributed_arch.png)
 
-> really like the arch of tikv right? hhhh
 #### 2.1.2 Concurrency Model: Worker Mechanism
+
 In a massive multi-agent system, a naive one-thread-per-request model leads to **"Thread Explosion."** If every Agent or MemSpace connection spawned dedicated threads for heavy operations (like vector embedding or complex IO), the system would suffer from severe context switching overhead.
 
 To solve this, I adopt an asynchronous **Worker Mechanism**, inspired by the *Coprocessor* concept in TiKV and the *RaftStore* threading model:

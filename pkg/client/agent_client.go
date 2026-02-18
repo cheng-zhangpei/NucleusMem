@@ -141,3 +141,39 @@ func (c *AgentClient) Shutdown() error {
 func (c *AgentClient) BaseURL() string {
 	return c.baseURL
 }
+func (c *AgentClient) Notify(key, content string) error {
+	req := &api.NotifyRequest{
+		Key:     key,
+		Content: content,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal notify request: %w", err)
+	}
+
+	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/notify", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to send notify request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("notify request failed with status: %d", resp.StatusCode)
+	}
+
+	var notifyResp api.NotifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&notifyResp); err != nil {
+		return fmt.Errorf("failed to decode notify response: %w", err)
+	}
+
+	if !notifyResp.Success {
+		msg := notifyResp.ErrorMessage
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return fmt.Errorf("notify failed: %s", msg)
+	}
+
+	return nil
+}

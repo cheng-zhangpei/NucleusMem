@@ -1,6 +1,7 @@
 package configs
 
 import (
+	"fmt"
 	"gopkg.in/yaml.v3" // ← 改用 v3
 	"os"
 )
@@ -106,4 +107,47 @@ func LoadMemSpaceManagerConfigFromYAML(filePath string) (*MemSpaceManagerConfig,
 	}
 
 	return &config, nil
+}
+func LoadMemSpaceConfigFromYAML(filePath string) (*MemSpaceConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	var cfg MemSpaceConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+	// Validate required fields
+	if cfg.MemSpaceID == 0 {
+		return nil, fmt.Errorf("memspace_id is required")
+	}
+	if cfg.HttpAddr == "" {
+		return nil, fmt.Errorf("http_addr is required")
+	}
+	if cfg.Type != "private" && cfg.Type != "public" {
+		return nil, fmt.Errorf("type must be 'private' or 'public'")
+	}
+
+	return &cfg, nil
+}
+
+func LoadMemSpaceMonitorConfigFromYAML(filePath string) (*MemSpaceMonitorConfig, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg MemSpaceMonitorConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	if cfg.NodeID == 0 {
+		return nil, fmt.Errorf("node_id is required")
+	}
+	if cfg.MonitorUrl == "" {
+		return nil, fmt.Errorf("monitor_url is required")
+	}
+
+	return &cfg, nil
 }

@@ -1,0 +1,6 @@
+node_id: 1
+monitor_url: "localhost:9100"
+memspace_manager_url: "http://localhost:9200"
+memspace_urls:
+  1001: "localhost:8081"
+  1002: "localhost:8082"

@@ -11,6 +11,7 @@ package memspace_region
 
 import (
 	"NucleusMem/pkg/client"
+	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/storage"
 	"encoding/binary"
 	"encoding/json"
@@ -36,10 +37,10 @@ type MemoryRecord struct {
 }
 
 type MemoryRegion struct {
-	memSpaceID      uint64
+	MemSpaceID      uint64
 	mu              sync.RWMutex
 	records         map[string]*MemoryRecord
-	kvClient        *tinykv_client.MemClient
+	KvClient        *tinykv_client.MemClient
 	embeddingClient *client.EmbeddingServerClient
 	neq             uint64 //Serial Number Maintenance Memory Record Key Increment
 }
@@ -49,8 +50,8 @@ func NewMemoryRegion(kvClient *tinykv_client.MemClient,
 	embeddingClient *client.EmbeddingServerClient) *MemoryRegion {
 	mr := &MemoryRegion{
 		records:         make(map[string]*MemoryRecord), // memory cache here
-		kvClient:        kvClient,
-		memSpaceID:      memSpaceID,
+		KvClient:        kvClient,
+		MemSpaceID:      memSpaceID,
 		embeddingClient: embeddingClient,
 	}
 	seq, _ := mr.loadNextSeq()
@@ -95,18 +96,18 @@ func (mr *MemoryRegion) Add(record *MemoryRecord) error {
 		return err
 	}
 
-	rawKey := EncodeKey(ZoneMemory, mr.memSpaceID, []byte(record.ID))
-	return mr.kvClient.Update(func(txn storage.Transaction) error {
+	rawKey := configs.EncodeKey(configs.ZoneMemory, mr.MemSpaceID, []byte(record.ID))
+	return mr.KvClient.Update(func(txn storage.Transaction) error {
 		return txn.Put(rawKey, data)
 	})
 }
 
 // GetAll scans all keys in Memory Zone for this MemSpace
 func (mr *MemoryRegion) GetAll() ([]*MemoryRecord, error) {
-	prefix := GetScanPrefix(ZoneMemory, mr.memSpaceID)
+	prefix := configs.GetScanPrefix(configs.ZoneMemory, mr.MemSpaceID)
 	var records []*MemoryRecord
 
-	err := mr.kvClient.Update(func(txn storage.Transaction) error {
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
 		if err != nil {
 			return err
@@ -135,9 +136,9 @@ func (mr *MemoryRegion) GetAll() ([]*MemoryRecord, error) {
 
 func (mr *MemoryRegion) ScanByAgent(agentID uint64) ([]*MemoryRecord, error) {
 	prefix := []byte(fmt.Sprintf("memory/%d/", agentID))
-	rawPrefix := EncodeKey(ZoneMemory, mr.memSpaceID, prefix)
+	rawPrefix := configs.EncodeKey(configs.ZoneMemory, mr.MemSpaceID, prefix)
 	var records []*MemoryRecord
-	err := mr.kvClient.Update(func(txn storage.Transaction) error {
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(rawPrefix)
 		if err != nil {
 			return err
@@ -242,9 +243,9 @@ func cosineSimilarity(a, b []float32) float32 {
 
 // loadNextSeq loads the next sequence number from storage
 func (mr *MemoryRegion) loadNextSeq() (uint64, error) {
-	rawKey := EncodeKey(ZoneMemory, mr.memSpaceID, []byte(SeqKey))
+	rawKey := configs.EncodeKey(configs.ZoneMemory, mr.MemSpaceID, []byte(SeqKey))
 	var seq uint64 = 1 // default if not exists
-	err := mr.kvClient.Update(func(txn storage.Transaction) error {
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
 		if err != nil {
 			// Key not found is OK — use default 1
@@ -258,11 +259,11 @@ func (mr *MemoryRegion) loadNextSeq() (uint64, error) {
 
 // saveNextSeq saves the next sequence number to storage
 func (mr *MemoryRegion) saveNextSeq(seq uint64) error {
-	rawKey := EncodeKey(ZoneMemory, mr.memSpaceID, []byte(SeqKey))
+	rawKey := configs.EncodeKey(configs.ZoneMemory, mr.MemSpaceID, []byte(SeqKey))
 	data := make([]byte, 8)
 	binary.LittleEndian.PutUint64(data, seq)
 
-	return mr.kvClient.Update(func(txn storage.Transaction) error {
+	return mr.KvClient.Update(func(txn storage.Transaction) error {
 		return txn.Put(rawKey, data)
 	})
 }
@@ -280,8 +281,8 @@ func (mr *MemoryRegion) GetBatch(startSeq, count uint64) ([]*MemoryRecord, error
 	// Since keys are lexicographically ordered, we can't use pure prefix,
 	// but we can scan and break early when seq >= endSeq.
 
-	prefix := GetScanPrefix(ZoneMemory, mr.memSpaceID)
-	err := mr.kvClient.Update(func(txn storage.Transaction) error {
+	prefix := configs.GetScanPrefix(configs.ZoneMemory, mr.MemSpaceID)
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
 		if err != nil {
 			return err
@@ -289,7 +290,7 @@ func (mr *MemoryRegion) GetBatch(startSeq, count uint64) ([]*MemoryRecord, error
 
 		for _, pair := range kvPairs {
 			// Decode user key from raw key
-			_, _, userKey, err := DecodeKey(pair.Key)
+			_, _, userKey, err := configs.DecodeKey(pair.Key)
 			if err != nil {
 				continue
 			}
@@ -329,8 +330,8 @@ func (mr *MemoryRegion) GetBatch(startSeq, count uint64) ([]*MemoryRecord, error
 
 	// Sort by sequence number to ensure order
 	sort.Slice(records, func(i, j int) bool {
-		seqI := ParseSeqFromKey(records[i].ID)
-		seqJ := ParseSeqFromKey(records[j].ID)
+		seqI := configs.ParseMemSeqFromKey(records[i].ID)
+		seqJ := configs.ParseMemSeqFromKey(records[j].ID)
 		return seqI < seqJ
 	})
 
@@ -339,9 +340,9 @@ func (mr *MemoryRegion) GetBatch(startSeq, count uint64) ([]*MemoryRecord, error
 
 func (mr *MemoryRegion) Count() (uint64, error) {
 	// Scan prefix and count keys (no value loading)
-	prefix := GetScanPrefix(ZoneMemory, mr.memSpaceID)
+	prefix := configs.GetScanPrefix(configs.ZoneMemory, mr.MemSpaceID)
 	var count uint64
-	err := mr.kvClient.Update(func(txn storage.Transaction) error {
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
 		if err != nil {
 			return err

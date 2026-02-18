@@ -38,13 +38,27 @@ type MemSpaceManagerConfig struct {
 	// MonitorURLs maps NodeID to MemSpaceMonitor HTTP addresses
 	// Example: {1: "localhost:9081", 2: "localhost:9082"}
 	MonitorURLs map[uint64]string `yaml:"monitor_urls"`
-
 	// ListenAddr is the address where MemSpaceManager HTTP server listens
 	ListenAddr string `yaml:"listen_addr"`
 }
 
 // MemSpaceMonitorConfig holds configuration for MemSpaceMonitor
 type MemSpaceMonitorConfig struct {
-	NodeID     uint64 `yaml:"node_id"`
-	MonitorUrl string `yaml:"monitor_url"` // HTTP server address
+	NodeID             uint64            `yaml:"node_id"`
+	MonitorUrl         string            `yaml:"monitor_url"`
+	MemSpaceManagerURL string            `yaml:"memspace_manager_url"`
+	MemSpaceUrls       map[uint64]string `yaml:"memspace_urls"`
+}
+type MemSpaceConfig struct {
+	MemSpaceID          uint64 `yaml:"memspace_id"`
+	Name                string `yaml:"name"`
+	Type                string `yaml:"type"` // "private" or "public"
+	OwnerID             uint64 `yaml:"owner_id"`
+	Description         string `yaml:"description"`
+	HttpAddr            string `yaml:"http_addr"`
+	PdAddr              string `yaml:"pd_addr"`
+	EmbeddingClientAddr string `yaml:"embedding_client_addr"`
+	LightModelAddr      string `yaml:"light_model_addr"`
+	SummaryCnt          uint64 `yaml:"summary_cnt"`
+	SummaryThreshold    uint64 `yaml:"summary_threshold"`
 }
