@@ -179,3 +179,35 @@ func (c *MemSpaceClient) Shutdown() error {
 	}
 	return nil
 }
+
+// BindAgent binds an agent to this MemSpace
+func (c *MemSpaceClient) BindAgent(agentID uint64) error {
+	req := api.BindAgentRequest{
+		AgentID: fmt.Sprintf("%d", agentID),
+	}
+	var resp api.BindAgentResponse
+	err := c.post("/api/v1/memspace/bind_agent", req, &resp)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("bind agent failed: %s", resp.ErrorMessage)
+	}
+	return nil
+}
+
+// UnbindAgent unbinds an agent from this MemSpace
+func (c *MemSpaceClient) UnbindAgent(agentID uint64) error {
+	req := api.UnbindAgentRequest{
+		AgentID: fmt.Sprintf("%d", agentID),
+	}
+	var resp api.UnbindAgentResponse
+	err := c.post("/api/v1/memspace/unbind_agent", req, &resp)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("unbind agent failed: %s", resp.ErrorMessage)
+	}
+	return nil
+}

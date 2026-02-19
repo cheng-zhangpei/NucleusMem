@@ -61,7 +61,7 @@ type MemSpaceInfo struct {
 	OwnerID     string `json:"owner_id"`
 	Type        string `json:"type"`
 	Status      string `json:"status"`
-	Addr        string `json:"addr"`
+	HttpAddr    string `json:"http_addr"`
 	Description string `json:"description"`
 	LastSeen    int64  `json:"last_seen"`
 }

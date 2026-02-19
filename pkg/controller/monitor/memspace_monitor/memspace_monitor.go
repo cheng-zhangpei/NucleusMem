@@ -38,10 +38,15 @@ type MemSpaceMonitor struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	isUpdateManager bool
+	managerClient   *client.MemSpaceManagerClient
 }
 
 // NewMemSpaceMonitor creates a new monitor
 func NewMemSpaceMonitor(config *configs.MemSpaceMonitorConfig) *MemSpaceMonitor {
+	var managerClient *client.MemSpaceManagerClient
+	if config.MemSpaceManagerURL != "" {
+		managerClient = client.NewMemSpaceManagerClient(config.MemSpaceManagerURL)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	mm := &MemSpaceMonitor{
 		id:              config.NodeID,
@@ -49,8 +54,9 @@ func NewMemSpaceMonitor(config *configs.MemSpaceMonitorConfig) *MemSpaceMonitor 
 		memspaces:       make(map[uint64]*MemSpaceInfo),
 		clients:         make(map[uint64]*client.MemSpaceClient),
 		isUpdateManager: false,
-		ctx:             ctx,    // ← 添加
-		cancel:          cancel, // ← 添加
+		ctx:             ctx,
+		cancel:          cancel,
+		managerClient:   managerClient,
 	}
 	mm.startSyncWorker()
 	return mm
@@ -117,7 +123,6 @@ func (mm *MemSpaceMonitor) ListMemSpaces() []*MemSpaceInfo {
 func (mm *MemSpaceMonitor) UnregisterMemSpace(memspaceID uint64) error {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
-
 	if _, exists := mm.memspaces[memspaceID]; !exists {
 		return fmt.Errorf("memspace %d not found", memspaceID)
 	}
@@ -130,7 +135,7 @@ func (mm *MemSpaceMonitor) startSyncWorker() {
 	mm.wg.Add(1)
 	go func() {
 		defer mm.wg.Done()
-		ticker := time.NewTicker(10 * time.Second) // 每10秒同步一次
+		ticker := time.NewTicker(10 * time.Second) // sync every 10 seconds
 		defer ticker.Stop()
 
 		for {
@@ -166,10 +171,9 @@ func (mm *MemSpaceMonitor) syncMemSpace(memspaceID uint64) {
 	if !ok {
 		return
 	}
-	// 调用 HealthCheck 获取最新信息
 	health, err := client.HealthCheckWithInfo()
 	if err != nil {
-		// 标记为 inactive
+		// tag inactive
 		mm.updateMemSpaceStatus(memspaceID, "inactive")
 		mm.isUpdateManager = true
 		return
@@ -180,12 +184,10 @@ func (mm *MemSpaceMonitor) syncMemSpace(memspaceID uint64) {
 func (mm *MemSpaceMonitor) updateMemSpaceInfo(memspaceID uint64, health *api.MemSpaceHealthResponse) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
-
 	info, exists := mm.memspaces[memspaceID]
 	if !exists {
 		return
 	}
-
 	// Check if any field has changed
 	hasChanged := false
 	if info.Name != health.Name ||
@@ -215,10 +217,34 @@ func (mm *MemSpaceMonitor) updateMemSpaceStatus(memspaceID uint64, status string
 		info.Status = status
 	}
 }
-func (mm *MemSpaceMonitor) reportToManager() {
 
-	log.Infof("MemSpaces update to manager")
-	// TODO: Send to MemSpaceManager
+func (mm *MemSpaceMonitor) reportToManager() {
+	if mm.managerClient == nil {
+		return // No manager configured
+	}
+	// Get current memspace list
+	memspaces := mm.ListMemSpaces()
+	// Convert to API format
+	updates := make([]api.MemSpaceInfo, len(memspaces))
+	for i, ms := range memspaces {
+		updates[i] = api.MemSpaceInfo{
+			MemSpaceID:  fmt.Sprintf("%d", ms.MemSpaceID),
+			Name:        ms.Name,
+			OwnerID:     fmt.Sprintf("%d", ms.OwnerID),
+			Type:        ms.Type,
+			Status:      ms.Status,
+			HttpAddr:    ms.Addr,
+			Description: ms.Description,
+			LastSeen:    ms.LastSeen,
+		}
+	}
+	// Send to manager
+	err := mm.managerClient.NotifyMemSpaceUpdate(updates)
+	if err != nil {
+		log.Warnf("Failed to notify manager: %v", err)
+	} else {
+		log.Infof("Successfully reported %d memspaces to manager", len(updates))
+	}
 }
 
 // LaunchMemSpace launches a MemSpace process

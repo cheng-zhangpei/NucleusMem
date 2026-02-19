@@ -33,7 +33,6 @@ func (c *MemSpaceMonitorClient) post(endpoint string, req interface{}, resp inte
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-
 	url := c.baseURL + endpoint
 	httpResp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
@@ -48,7 +47,6 @@ func (c *MemSpaceMonitorClient) post(endpoint string, req interface{}, resp inte
 	if err := json.NewDecoder(httpResp.Body).Decode(resp); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
-
 	return nil
 }
 

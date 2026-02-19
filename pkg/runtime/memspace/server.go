@@ -205,10 +205,56 @@ func (s *MemSpaceHTTPServer) handleShutdown(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Start initializes and starts the HTTP server
-func (s *MemSpaceHTTPServer) Start(addr string) error {
-	mux := http.NewServeMux()
+// POST /api/v1/memspace/bind_agent
+func (s *MemSpaceHTTPServer) handleBindAgent(w http.ResponseWriter, r *http.Request) {
+	var req api.BindAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
 
+	agentID, err := strconv.ParseUint(req.AgentID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid agent_id", http.StatusBadRequest)
+		return
+	}
+
+	err = s.memSpace.BindAgent(agentID)
+	resp := api.BindAgentResponse{Success: err == nil}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/unbind_agent
+func (s *MemSpaceHTTPServer) handleUnbindAgent(w http.ResponseWriter, r *http.Request) {
+	var req api.UnbindAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	agentID, err := strconv.ParseUint(req.AgentID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid agent_id", http.StatusBadRequest)
+		return
+	}
+
+	err = s.memSpace.UnBindAgent(agentID)
+	resp := api.UnbindAgentResponse{Success: err == nil}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Start initializes and starts the HTTP server
+func (s *MemSpaceHTTPServer) Start() error {
+	mux := http.NewServeMux()
+	addr := s.memSpace.httpAddr
 	// Core methods
 	mux.HandleFunc("/api/v1/memspace/write_memory", s.handleWriteMemory)
 	mux.HandleFunc("/api/v1/memspace/get_memory_context", s.handleGetMemoryContext)
@@ -218,7 +264,8 @@ func (s *MemSpaceHTTPServer) Start(addr string) error {
 	mux.HandleFunc("/api/v1/memspace/list_agents", s.handleListAgents)
 	mux.HandleFunc("/api/v1/memspace/shutdown", s.handleShutdown)
 	mux.HandleFunc("/api/v1/memspace/health", s.handleHealth)
-
+	mux.HandleFunc("/api/v1/memspace/bind_agent", s.handleBindAgent)
+	mux.HandleFunc("/api/v1/memspace/unbind_agent", s.handleUnbindAgent)
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

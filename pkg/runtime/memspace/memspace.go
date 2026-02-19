@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pkg/errors"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -39,58 +38,68 @@ type MemSpace struct {
 	MemoryRegion      *memspace_region.MemoryRegion
 	CommRegion        *memspace_region.CommRegion
 	SummaryRegion     *memspace_region.SummaryRegion
+	mu                sync.RWMutex
+
+	status      configs.MemSpaceStatus
+	boundAgents map[uint64]bool
+	httpAddr    string
 }
 
-// NewMemSpace creates a new MemSpace instance
-func NewMemSpace(
-	id string,
-	memspaceType MemSpaceType,
-	description string,
-	ownerID uint64,
-	summaryCnt uint64,
-	summaryThreshold uint64, // ← 新增阈值参数
-	pdAddr string,
-	embeddingClientAddr string,
-	lightModelAddr string,
-) (*MemSpace, error) {
-	if id == "" {
-		return nil, errors.New("memspace ID required")
+// NewMemSpace creates a new MemSpace instance from config
+func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
+	// Validate required fields
+	if config.MemSpaceID == 0 {
+		return nil, errors.New("memspace_id is required")
 	}
-	if memspaceType != MemSpaceTypePrivate && memspaceType != MemSpaceTypePublic {
-		return nil, errors.New("invalid memspace type")
+	if config.Type != "private" && config.Type != "public" {
+		return nil, errors.New("type must be 'private' or 'public'")
 	}
+
+	// Set defaults
+	summaryCnt := config.SummaryCnt
 	if summaryCnt == 0 {
 		summaryCnt = 5 // default batch size
 	}
+
+	summaryThreshold := config.SummaryThreshold
 	if summaryThreshold == 0 {
 		summaryThreshold = 10 // default threshold
 	}
 
-	kvClient, err := tinykv_client.NewMemClient(pdAddr)
+	// Create clients
+	kvClient, err := tinykv_client.NewMemClient(config.PdAddr)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create TinyKV client")
 	}
-	idUint64, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse memspace ID")
-	}
-	serverClient := client.NewEmbeddingServerClient(embeddingClientAddr)
-	chatServerClient := client.NewChatServerClient(lightModelAddr)
+
+	serverClient := client.NewEmbeddingServerClient(config.EmbeddingClientAddr)
+	chatServerClient := client.NewChatServerClient(config.LightModelAddr)
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Convert type string to enum
+	var memspaceType MemSpaceType
+	if config.Type == "private" {
+		memspaceType = MemSpaceTypePrivate
+	} else {
+		memspaceType = MemSpaceTypePublic
+	}
+
 	ms := &MemSpace{
-		ID:               id,
+		ID:               fmt.Sprintf("%d", config.MemSpaceID),
 		Type:             memspaceType,
-		Description:      description,
-		OwnerID:          ownerID,
+		Description:      config.Description,
+		OwnerID:          config.OwnerID,
 		summaryCnt:       summaryCnt,
 		summaryThreshold: summaryThreshold,
 		workerCtx:        ctx,
 		workerCancel:     cancel,
 		chatServer:       chatServerClient,
-		MemoryRegion:     memspace_region.NewMemoryRegion(kvClient, idUint64, serverClient),
-		CommRegion:       memspace_region.NewCommRegion(kvClient, idUint64),
-		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, idUint64),
+		MemoryRegion:     memspace_region.NewMemoryRegion(kvClient, config.MemSpaceID, serverClient),
+		CommRegion:       memspace_region.NewCommRegion(kvClient, config.MemSpaceID),
+		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, config.MemSpaceID),
+		status:           configs.MemSpaceStatusInactive,
+		boundAgents:      make(map[uint64]bool),
+		httpAddr:         config.HttpAddr,
 	}
 
 	// Start background summary worker
@@ -98,8 +107,8 @@ func NewMemSpace(
 
 	return ms, nil
 }
-
 func (m *MemSpace) WriteMemory(memory string, agentId uint64) error {
+	// todo (cheng) check the authority
 	if memory == "" {
 		return errors.New("memory content cannot be empty")
 	}
@@ -194,16 +203,68 @@ func (m *MemSpace) trySummarize() {
 	log.Infof("the summary record has been added to the summary region,lastIndex :%d", m.lastSummarizedSeq)
 }
 func (m *MemSpace) RegisterAgent(agentID uint64, addr, role string) error {
+	if m.Type == MemSpaceTypePrivate {
+		return fmt.Errorf("the memspace type is private")
+	}
 	return m.CommRegion.RegisterAgent(agentID, addr, role)
 }
 func (m *MemSpace) UnRegisterAgent(agentID uint64) error {
+	if m.Type == MemSpaceTypePrivate {
+		return fmt.Errorf("the memspace type is private")
+	}
 	return m.CommRegion.UnregisterAgent(agentID)
 }
 func (m *MemSpace) SendMessage(fromAgent, toAgent uint64, key, refType string) error {
+	if m.Type == MemSpaceTypePrivate {
+		return fmt.Errorf("the memspace type is private")
+	}
 	return m.CommRegion.SendMessage(fromAgent, toAgent, key, refType)
 }
 func (m *MemSpace) ListAgents() []memspace_region.AgentRegistryEntry {
+	if m.Type == MemSpaceTypePrivate {
+		return nil
+	}
 	return m.CommRegion.ListAgents()
+}
+
+func (m *MemSpace) BindAgent(agentID uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.boundAgents[agentID] = true
+	if m.status == configs.MemSpaceStatusInactive {
+		m.status = configs.MemSpaceStatusActive
+		log.Infof("MemSpace %s activated by agent %d", m.ID, agentID)
+	}
+	return nil
+}
+
+// UnBindAgent unbinds an agent from this MemSpace and updates status
+func (m *MemSpace) UnBindAgent(agentID uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.boundAgents, agentID)
+	if len(m.boundAgents) == 0 && m.status == configs.MemSpaceStatusActive {
+		m.status = configs.MemSpaceStatusInactive
+		log.Infof("MemSpace %s deactivated (no agents bound)", m.ID)
+	}
+	return nil
+}
+
+// GetStatus returns the current status of the MemSpace
+func (m *MemSpace) GetStatus() configs.MemSpaceStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.status
+}
+
+// IsBound checks if an agent is bound to this MemSpace
+func (m *MemSpace) IsBound(agentID uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.boundAgents[agentID]
+	return exists
 }
 func (m *MemSpace) Stop() {
 	m.workerCancel()

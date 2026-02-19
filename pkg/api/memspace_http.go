@@ -77,3 +77,21 @@ type ListAgentsResponse struct {
 	Success bool                 `json:"success"`
 	Agents  []AgentRegistryEntry `json:"agents"`
 }
+
+// BindAgent
+type BindAgentRequest struct {
+	AgentID string `json:"agent_id"`
+}
+type BindAgentResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+// UnbindAgent
+type UnbindAgentRequest struct {
+	AgentID string `json:"agent_id"`
+}
+type UnbindAgentResponse struct {
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}

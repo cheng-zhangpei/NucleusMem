@@ -9,7 +9,7 @@ type MemSpaceInfo struct {
 	OwnerAgentID uint64            `json:"owner_agent_id"`
 	Type         string            `json:"type"` // "private", "public", "shared"
 	NodeID       uint64            `json:"node_id"`
-	NodeAddr     string            `json:"node_addr"`
+	HttpAddr     string            `json:"addr"`
 	Status       string            `json:"status"` // "active", "inactive"
 	CreatedAt    int64             `json:"created_at"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
@@ -47,7 +47,6 @@ func (c *MemSpaceCache) GetMemSpace(memspaceID uint64) (*MemSpaceInfo, bool) {
 func (c *MemSpaceCache) GetAllMemSpaces() []*MemSpaceInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
 	result := make([]*MemSpaceInfo, 0, len(c.memspaces))
 	for _, info := range c.memspaces {
 		result = append(result, info)

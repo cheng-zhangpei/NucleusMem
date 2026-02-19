@@ -26,7 +26,6 @@ func main() {
 		MonitorUrl: "localhost:8081",
 	}
 	monitor := agent_monitor.NewAgentMonitor(monitorConfig)
-
 	// Connect to running agents
 	agents := []struct {
 		id   uint64
@@ -37,8 +36,7 @@ func main() {
 		{103, "localhost:9003"},
 		{104, "localhost:9004"},
 	}
-
-	log.Infof("🧪 Connecting Monitor (ID=1) to %d agents...", len(agents))
+	log.Infof("Connecting Monitor (ID=1) to %d agents...", len(agents))
 	for _, agent := range agents {
 		err := monitor.ConnectToAgent(agent.id, agent.addr)
 		if err != nil {

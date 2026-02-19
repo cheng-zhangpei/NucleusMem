@@ -61,4 +61,16 @@ type MemSpaceConfig struct {
 	LightModelAddr      string `yaml:"light_model_addr"`
 	SummaryCnt          uint64 `yaml:"summary_cnt"`
 	SummaryThreshold    uint64 `yaml:"summary_threshold"`
+	BinPath             string `yaml:"bin_path"`
+	ConfigFilePath      string `yaml:"config_file_path"`
 }
+
+// MemSpaceStatus represents the lifecycle state of a MemSpace
+type MemSpaceStatus string
+
+const (
+	MemSpaceStatusInactive MemSpaceStatus = "inactive" // No agents bound
+	MemSpaceStatusActive   MemSpaceStatus = "active"   // At least one agent bound
+	MemSpaceStatusStopping MemSpaceStatus = "stopping" // Being shut down
+	MemSpaceStatusStopped  MemSpaceStatus = "stopped"  // Fully stopped
+)
