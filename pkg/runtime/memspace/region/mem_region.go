@@ -16,6 +16,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"math"
 	"sort"
 	"strconv"
@@ -133,7 +134,49 @@ func (mr *MemoryRegion) GetAll() ([]*MemoryRecord, error) {
 	}
 	return records, nil
 }
+func (mr *MemoryRegion) GetAllWithKeys() ([]struct {
+	Key    string
+	Record *MemoryRecord
+}, error) {
+	prefix := configs.GetScanPrefix(configs.ZoneMemory, mr.MemSpaceID)
+	var results []struct {
+		Key    string
+		Record *MemoryRecord
+	}
 
+	err := mr.KvClient.Update(func(txn storage.Transaction) error {
+		kvPairs, err := txn.Scan(prefix)
+		if err != nil {
+			return err
+		}
+		for _, pair := range kvPairs {
+			var record MemoryRecord
+			if err := json.Unmarshal(pair.Value, &record); err != nil {
+				continue // skip corrupted
+			}
+			results = append(results, struct {
+				Key    string
+				Record *MemoryRecord
+			}{
+				Key:    string(pair.Key),
+				Record: &record,
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache by ID
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
+	for _, item := range results {
+		mr.records[item.Record.ID] = item.Record
+	}
+	return results, nil
+}
 func (mr *MemoryRegion) ScanByAgent(agentID uint64) ([]*MemoryRecord, error) {
 	prefix := []byte(fmt.Sprintf("memory/%d/", agentID))
 	rawPrefix := configs.EncodeKey(configs.ZoneMemory, mr.MemSpaceID, prefix)
@@ -153,6 +196,18 @@ func (mr *MemoryRegion) ScanByAgent(agentID uint64) ([]*MemoryRecord, error) {
 		return nil
 	})
 	return records, err
+}
+
+// DeleteBatchByKeys deletes entries by their actual KV keys
+func (mr *MemoryRegion) DeleteBatchByKeys(keys []string) error {
+	return mr.KvClient.Update(func(txn storage.Transaction) error {
+		for _, k := range keys {
+			if err := txn.Delete([]byte(k)); err != nil {
+				log.Warnf("Failed to delete key %s: %v", k, err)
+			}
+		}
+		return nil
+	})
 }
 
 // Search returns top-n most similar memory contents based on semantic similarity
@@ -250,6 +305,13 @@ func (mr *MemoryRegion) loadNextSeq() (uint64, error) {
 		if err != nil {
 			// Key not found is OK — use default 1
 			return nil
+		}
+		if len(data) == 0 {
+			return nil
+		}
+
+		if len(data) < 8 {
+			return fmt.Errorf("corrupted sequence key: got %d bytes, want 8", len(data))
 		}
 		seq = binary.LittleEndian.Uint64(data)
 		return nil
@@ -351,4 +413,16 @@ func (mr *MemoryRegion) Count() (uint64, error) {
 		return nil
 	})
 	return count, err
+}
+func (mr *MemoryRegion) DeleteBatch(ids []string) error {
+	return mr.KvClient.Update(func(txn storage.Transaction) error {
+		for _, id := range ids {
+			rawKey := []byte(id) // 假设 ID 就是完整 key
+			if err := txn.Delete(rawKey); err != nil {
+				log.Warnf("Failed to delete key %s: %v", id, err)
+				// 继续删除其他
+			}
+		}
+		return nil
+	})
 }

@@ -12,14 +12,14 @@ import (
 
 // MemSpaceClient is the HTTP client for MemSpace operations
 type MemSpaceClient struct {
-	baseURL    string
+	BaseURL    string
 	httpClient *http.Client
 }
 
 // NewMemSpaceClient creates a new MemSpace client
 func NewMemSpaceClient(baseURL string) *MemSpaceClient {
 	return &MemSpaceClient{
-		baseURL: baseURL,
+		BaseURL: baseURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -33,7 +33,7 @@ func (c *MemSpaceClient) post(endpoint string, req interface{}, resp interface{}
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := c.baseURL + endpoint
+	url := c.BaseURL + endpoint
 	httpResp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
@@ -210,4 +210,25 @@ func (c *MemSpaceClient) UnbindAgent(agentID uint64) error {
 		return fmt.Errorf("unbind agent failed: %s", resp.ErrorMessage)
 	}
 	return nil
+}
+
+// GetByKey fetches raw value by raw key (returns raw bytes)
+func (c *MemSpaceClient) GetMemoryByKey(rawKey []byte) (string, error) {
+	req := map[string]string{
+		"raw_key": string(rawKey),
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Value   string `json:"value"`
+		Error   string `json:"error"`
+	}
+	err := c.post("/api/v1/memspace/get_by_key", req, &resp)
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("get by key failed: %s", resp.Error)
+	}
+	return resp.Value, nil
+
 }

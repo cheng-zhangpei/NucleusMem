@@ -48,3 +48,15 @@ type NotifyResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
+
+// BindMemSpaceRequest is used to bind an agent to a MemSpace
+type BindMemSpaceRequest struct {
+	MemSpaceID string `json:"memspace_id"`
+	Type       string `json:"type"` // "private" or "public"
+	HttpAddr   string `json:"http_addr"`
+}
+
+// UnbindMemSpaceRequest is used to unbind an agent from a MemSpace
+type UnbindMemSpaceRequest struct {
+	MemSpaceID string `json:"memspace_id"`
+}

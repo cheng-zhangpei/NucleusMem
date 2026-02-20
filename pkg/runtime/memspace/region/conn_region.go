@@ -94,6 +94,12 @@ func (cr *CommRegion) loadSeq() (uint64, error) {
 	var seq uint64 = 1
 	err := cr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
+		if len(data) == 0 {
+			return nil
+		}
+		if len(data) < 8 {
+			return nil
+		}
 		if err != nil {
 			return nil
 		}

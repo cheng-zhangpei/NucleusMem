@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,7 +28,7 @@ type Agent struct {
 	boundMonitorID         uint64
 	boundMu                sync.RWMutex
 
-	taskQueue chan AgentTask
+	taskQueue chan *AgentTask
 }
 
 // NewAgent creates a new Agent and initializes all service clients
@@ -43,7 +44,7 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 	}
 	//agent.bindingMemspace()
 	ctx, _ := context.WithCancel(context.Background())
-	agent.taskQueue = make(chan AgentTask, 1000)
+	agent.taskQueue = make(chan *AgentTask, 1000)
 	agent.maxHistory = 10
 	// Connect to private MemSpace (required)
 	if !agent.isJob {
@@ -224,27 +225,38 @@ func (a *Agent) Start(ctx context.Context) error {
 }
 
 // handleTask 根据类型分发
-func (a *Agent) handleTask(task AgentTask) error {
+func (a *Agent) handleTask(task *AgentTask) error {
 	switch task.Type {
 	case TaskTypeComm:
-		return a.handleCommTask(task)
+		// todo(cheng) after get the communicateInfo we should send it to task queue again
+		content, err := a.handleCommTask(task)
+		agentTask := &AgentTask{Type: TaskTypeChat, Key: "", Content: content, Timestamp: time.Now().Unix()}
+		err = a.handleTask(agentTask)
+		if err != nil {
+			return err
+		}
+		return err
 	case TaskTypeTempChat:
 		return a.handleTempChatTask(task)
-	//case TaskTypeChat:
-	//return a.handleChatTask(task)
+	case TaskTypeChat:
+		return a.handleChatTask(task)
 	default:
 		return fmt.Errorf("unknown task type: %s", task.Type)
 	}
 }
 
-func (a *Agent) SubmitTask(task AgentTask) error {
+func (a *Agent) SubmitTask(task *AgentTask) error {
 	if task.Timestamp == 0 {
 		task.Timestamp = time.Now().Unix()
 	}
 	a.taskQueue <- task
 	return nil
 }
-func (a *Agent) handleTempChatTask(task AgentTask) error {
+func (a *Agent) handleChatTask(task *AgentTask) error {
+	return nil
+}
+
+func (a *Agent) handleTempChatTask(task *AgentTask) error {
 	content := task.Content
 	if content == "" {
 		return fmt.Errorf("temp chat task requires direct content")
@@ -295,32 +307,93 @@ func (a *Agent) handleTempChatTask(task AgentTask) error {
 	log.Infof("Agent %d processed temp chat: %s → %s", a.AgentId, content, response)
 	return nil
 }
-func (a *Agent) handleCommTask(task AgentTask) error {
+func (a *Agent) handleCommTask(task *AgentTask) (string, error) {
 	// 如果 Content 已提供，直接使用
 	var content string
+	var err error
 	if task.Content != "" {
 		content = task.Content
 	} else {
-		// 否则从 MemSpace 读取
-		//client, ok := a.GetMemSpaceClient(0) // 假设公共 MemSpace ID = 0
-		//if !ok {
-		//	return fmt.Errorf("no memspace client available for comm task")
-		//}
-		//
-		//record, err := client.GetMemory(task.Key)
-		//if err != nil {
-		//	return fmt.Errorf("failed to get memory for comm task: %w", err)
-		//}
-		//content = record.Content
+		client, ok := a.GetMemSpaceClient(0) // 假设公共 MemSpace ID = 0
+		if !ok {
+			return "", fmt.Errorf("no memspace client available for comm task")
+		}
+		content, err = client.GetMemoryByKey([]byte(task.Key))
+		if err != nil {
+			return "", fmt.Errorf("failed to get memory by key: %w", err)
+		}
+	}
+	response, err := a.Chat(content)
+	if err != nil {
+		return response, err
 	}
 	log.Infof("Agent %d received comm task: %s", a.AgentId, content)
-	a.tempMemory = append(a.tempMemory, client.ChatMessage{
-		Role:    "user",
-		Content: "[Collaboration] " + content,
-	})
+	return "", nil
+}
+
+// bindingMemSpace binds the agent to a MemSpace (local only, no manager call)
+func (a *Agent) bindingMemSpace(memSpaceConfig *configs.MemSpaceConfig) error {
+	if memSpaceConfig == nil {
+		return fmt.Errorf("memspace config is nil")
+	}
+
+	// Create client
+	baseURL := memSpaceConfig.HttpAddr
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	client := client.NewMemSpaceClient(baseURL)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Store in main map
+	a.memSpaceClients[memSpaceConfig.MemSpaceID] = client
+
+	// Update private/public references
+	if memSpaceConfig.Type == "private" {
+		a.privateMemSpaceClients = client
+	} else if memSpaceConfig.Type == "public" {
+		// Avoid duplicates
+		exists := false
+		for _, c := range a.publicMemSpaceClients {
+			if c != nil && c.BaseURL == client.BaseURL {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			a.publicMemSpaceClients = append(a.publicMemSpaceClients, client)
+		}
+	}
+
+	log.Infof("Agent %d bound to MemSpace %d (%s)", a.AgentId, memSpaceConfig.MemSpaceID, memSpaceConfig.Type)
 	return nil
 }
 
-func (a *Agent) bindingMemspace(memSpaceID uint64) error {
+// unBindingMemSpace unbinds the agent from a MemSpace (local only)
+func (a *Agent) unBindingMemSpace(memID uint64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	memspaceClient, exists := a.memSpaceClients[memID]
+	if !exists {
+		return fmt.Errorf("memspace %d not bound", memID)
+	}
+	// Remove from main map
+	delete(a.memSpaceClients, memID)
+	// Remove from private reference
+	if a.privateMemSpaceClients != nil && a.privateMemSpaceClients == memspaceClient {
+		a.privateMemSpaceClients = nil
+	}
+	// Remove from public slice
+	newPublic := make([]*client.MemSpaceClient, 0, len(a.publicMemSpaceClients))
+	for _, c := range a.publicMemSpaceClients {
+		if c != memspaceClient {
+			newPublic = append(newPublic, c)
+		}
+	}
+	a.publicMemSpaceClients = newPublic
+
+	log.Infof("Agent %d unbound from MemSpace %d", a.AgentId, memID)
 	return nil
 }

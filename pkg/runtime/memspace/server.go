@@ -250,6 +250,32 @@ func (s *MemSpaceHTTPServer) handleUnbindAgent(w http.ResponseWriter, r *http.Re
 	}
 	json.NewEncoder(w).Encode(resp)
 }
+func (s *MemSpaceHTTPServer) handleGetByKey(w http.ResponseWriter, r *http.Request) {
+	var req api.GetByKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.RawKey == "" {
+		http.Error(w, "raw_key is required", http.StatusBadRequest)
+		return
+	}
+
+	rawKey := []byte(req.RawKey) // 直接当作 raw key
+
+	value, err := s.memSpace.GetByKey(rawKey)
+	resp := api.GetByKeyResponse{Success: err == nil}
+	if err != nil {
+		resp.Error = err.Error()
+		w.WriteHeader(http.StatusNotFound)
+	} else {
+		// ✅ 直接转为 string（假设存储的是 JSON 或文本）
+		resp.Value = string(value)
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
 
 // Start initializes and starts the HTTP server
 func (s *MemSpaceHTTPServer) Start() error {
@@ -266,6 +292,7 @@ func (s *MemSpaceHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/memspace/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/memspace/bind_agent", s.handleBindAgent)
 	mux.HandleFunc("/api/v1/memspace/unbind_agent", s.handleUnbindAgent)
+	mux.HandleFunc("/api/v1/memspace/get_by_key", s.handleGetByKey)
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

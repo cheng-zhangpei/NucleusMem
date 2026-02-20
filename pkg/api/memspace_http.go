@@ -95,3 +95,12 @@ type UnbindAgentResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
+type GetByKeyRequest struct {
+	RawKey string `json:"raw_key"` // plain string, e.g., "memory/1001/5"
+}
+
+type GetByKeyResponse struct {
+	Success bool   `json:"success"`
+	Value   string `json:"value,omitempty"` // raw JSON string
+	Error   string `json:"error,omitempty"`
+}

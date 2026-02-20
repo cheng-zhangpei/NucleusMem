@@ -5,6 +5,7 @@ import (
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	memspace_region "NucleusMem/pkg/runtime/memspace/region"
+	"NucleusMem/pkg/storage"
 	"NucleusMem/pkg/storage/tinykv-client"
 	"context"
 	"fmt"
@@ -39,10 +40,10 @@ type MemSpace struct {
 	CommRegion        *memspace_region.CommRegion
 	SummaryRegion     *memspace_region.SummaryRegion
 	mu                sync.RWMutex
-
-	status      configs.MemSpaceStatus
-	boundAgents map[uint64]bool
-	httpAddr    string
+	kvClient          *tinykv_client.MemClient
+	status            configs.MemSpaceStatus
+	boundAgents       map[uint64]bool
+	httpAddr          string
 }
 
 // NewMemSpace creates a new MemSpace instance from config
@@ -94,16 +95,17 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 		workerCtx:        ctx,
 		workerCancel:     cancel,
 		chatServer:       chatServerClient,
+		kvClient:         kvClient,
 		MemoryRegion:     memspace_region.NewMemoryRegion(kvClient, config.MemSpaceID, serverClient),
 		CommRegion:       memspace_region.NewCommRegion(kvClient, config.MemSpaceID),
-		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, config.MemSpaceID),
+		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, chatServerClient, config.MemSpaceID),
 		status:           configs.MemSpaceStatusInactive,
 		boundAgents:      make(map[uint64]bool),
 		httpAddr:         config.HttpAddr,
 	}
 
 	// Start background summary worker
-	ms.startSummaryWorker()
+	// ms.startSummaryWorker()
 
 	return ms, nil
 }
@@ -164,31 +166,35 @@ func (m *MemSpace) startSummaryWorker() {
 	}()
 }
 func (m *MemSpace) trySummarize() {
-	// Step 1: Check total count via a lightweight method (optional)
-	// For now, just try to fetch next batch
 	count, err := m.MemoryRegion.Count()
 	if err != nil || count < m.summaryThreshold {
-		log.Infof("the count:%d is not satisfied with the threshold:%d", count, m.summaryThreshold)
 		return
 	}
-	// Now fetch a batch to summarize
-	batch, err := m.MemoryRegion.GetBatch(m.lastSummarizedSeq+1, m.summaryCnt)
+
+	// 获取 (key, record) 对
+	batch, err := m.MemoryRegion.GetAllWithKeys()
 	if err != nil {
 		log.Warnf("Failed to get memory batch: %v", err)
 		return
 	}
-	// Step 2: Generate summary
+
 	var contents []string
 	var sourceIDs []string
+	var deleteKeys []string
 	var maxSeq uint64
-	for _, rec := range batch {
-		contents = append(contents, rec.Content)
-		sourceIDs = append(sourceIDs, rec.ID)
-		seq := configs.ParseMemSeqFromKey(rec.ID)
+
+	for _, item := range batch {
+		contents = append(contents, item.Record.Content)
+		sourceIDs = append(sourceIDs, item.Record.ID)
+		deleteKeys = append(deleteKeys, item.Key)
+
+		seq := configs.ParseMemSeqFromKey(item.Key)
 		if seq > maxSeq {
 			maxSeq = seq
 		}
 	}
+
+	// gen the summary
 	summaryRec, err := m.SummaryRegion.GenerateSummary(contents, sourceIDs)
 	if err != nil {
 		log.Errorf("Summary generation failed: %v", err)
@@ -198,9 +204,14 @@ func (m *MemSpace) trySummarize() {
 		log.Errorf("Failed to save summary: %v", err)
 		return
 	}
-	// Step 3: Update last processed sequence
+
+	err = m.MemoryRegion.DeleteBatchByKeys(deleteKeys)
+	if err != nil {
+		log.Warnf("Failed to delete compressed memories: %v", err)
+	}
+
 	m.lastSummarizedSeq = maxSeq
-	log.Infof("the summary record has been added to the summary region,lastIndex :%d", m.lastSummarizedSeq)
+	log.Infof("Summary added and %d memories deleted. LastIndex: %d", len(deleteKeys), m.lastSummarizedSeq)
 }
 func (m *MemSpace) RegisterAgent(agentID uint64, addr, role string) error {
 	if m.Type == MemSpaceTypePrivate {
@@ -237,6 +248,21 @@ func (m *MemSpace) BindAgent(agentID uint64) error {
 		log.Infof("MemSpace %s activated by agent %d", m.ID, agentID)
 	}
 	return nil
+}
+func (ms *MemSpace) GetByKey(rawKey []byte) ([]byte, error) {
+	var value []byte
+	err := ms.kvClient.Update(func(txn storage.Transaction) error {
+		data, err := txn.Get(rawKey)
+		if err != nil {
+			return err // e.g., not found
+		}
+		value = data
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 // UnBindAgent unbinds an agent from this MemSpace and updates status

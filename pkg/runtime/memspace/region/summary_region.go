@@ -2,11 +2,14 @@
 package memspace_region
 
 import (
+	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/storage"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,13 +32,15 @@ type SummaryRegion struct {
 	summaries  map[string]*SummaryRecord
 	kvClient   *tinykv_client.MemClient
 	seq        uint64 // sequence number for generating unique keys
+	chatClient *client.ChatServerClient
 }
 
-func NewSummaryRegion(kvClient *tinykv_client.MemClient, memSpaceID uint64) *SummaryRegion {
+func NewSummaryRegion(kvClient *tinykv_client.MemClient, chatClient *client.ChatServerClient, memSpaceID uint64) *SummaryRegion {
 	sr := &SummaryRegion{
 		memSpaceID: memSpaceID,
 		summaries:  make(map[string]*SummaryRecord),
 		kvClient:   kvClient,
+		chatClient: chatClient,
 	}
 
 	// Load sequence number from dedicated key (O(1))
@@ -57,7 +62,6 @@ func (sr *SummaryRegion) Add(summary *SummaryRecord) error {
 	if err != nil {
 		return err
 	}
-
 	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(summary.ID))
 	return sr.kvClient.Update(func(txn storage.Transaction) error {
 		return txn.Put(rawKey, data)
@@ -145,34 +149,52 @@ func (sr *SummaryRegion) GetBefore(timestamp int64) ([]*SummaryRecord, error) {
 
 // GenerateSummary creates a compressed summary from a list of memory contents
 // For now, return a placeholder.
+// GenerateSummary creates a compressed summary from a list of memory contents
 func (sr *SummaryRegion) GenerateSummary(contents []string, sourceIDs []string) (*SummaryRecord, error) {
 	if len(contents) == 0 {
 		return nil, fmt.Errorf("no content to summarize")
 	}
-	// Placeholder summary
-	const maxLen = 500
-	// todo(cheng): Integrate small LLM for actual summarization
-	summaryText := ""
+
+	// Step 1: 拼接原始内容（限制长度）
+	const maxInputLen = 2000 // 避免超长输入
+	var inputText strings.Builder
 	for _, c := range contents {
-		if len(summaryText)+len(c) > maxLen {
+		if inputText.Len()+len(c) > maxInputLen {
 			break
 		}
-		summaryText += c + " "
+		inputText.WriteString("- ")
+		inputText.WriteString(c)
+		inputText.WriteString("\n")
 	}
-	// Atomically get and increment sequence number
+	// Step 2: 构造 Prompt
+	prompt := fmt.Sprintf(`You are a memory summarizer. 
+Please generate a concise, coherent summary of the following memory entries.
+Focus on key facts, events, and relationships. Keep it under 3 sentences.
+
+Memory entries:
+%s
+
+Summary:`, inputText.String())
+
+	summaryText, err := sr.chatClient.QuickChat(prompt)
+	if err != nil {
+		// 如果模型失败，回退到简单拼接
+		log.Warnf("Failed to generate AI summary: %v, falling back to concatenation", err)
+		return &SummaryRecord{}, nil
+	}
+	// Step 4: 生成唯一 ID
 	sr.mu.Lock()
 	sr.seq++
 	key := fmt.Sprintf("summary/%d", sr.seq)
-	err := sr.saveSummarySeq(sr.seq) // persist immediately
+	err = sr.saveSummarySeq(sr.seq)
 	sr.mu.Unlock()
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to save summary sequence: %w", err)
 	}
 
 	return &SummaryRecord{
 		ID:        key,
-		Content:   summaryText,
+		Content:   summaryText.Response,
 		SourceIDs: sourceIDs,
 		Timestamp: time.Now().Unix(),
 	}, nil
@@ -182,12 +204,18 @@ func (sr *SummaryRegion) GenerateSummary(contents []string, sourceIDs []string) 
 func (sr *SummaryRegion) loadSummarySeq() (uint64, error) {
 	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(SummarySeqKey))
 	var seq uint64 = 1
-
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
 		if err != nil {
-			return nil // key not found → use default 1
+			return nil
 		}
+		if len(data) == 0 {
+			return nil
+		}
+		if len(data) < 8 {
+			return nil
+		}
+
 		seq = binary.LittleEndian.Uint64(data)
 		return nil
 	})

@@ -24,6 +24,31 @@ func NewAgentClient(baseURL string) *AgentClient {
 	}
 }
 
+// Helper to make POST requests
+func (c *AgentClient) post(endpoint string, req interface{}, resp interface{}) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s%s", c.BaseURL, endpoint)
+	httpResp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status: %d", httpResp.StatusCode)
+	}
+
+	if err := json.NewDecoder(httpResp.Body).Decode(resp); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return nil
+}
+
 // TempChat sends a temporary chat message to the agent (in-memory context only)
 func (c *AgentClient) TempChat(message string) (*api.TempChatResponse, error) {
 	req := api.TempChatRequest{Message: message}
@@ -175,5 +200,42 @@ func (c *AgentClient) Notify(key, content string) error {
 		return fmt.Errorf("notify failed: %s", msg)
 	}
 
+	return nil
+}
+
+// BindMemSpace binds the agent to a MemSpace (local only)
+func (c *AgentClient) BindMemSpace(req *api.BindMemSpaceRequest) error {
+	var resp map[string]interface{}
+	err := c.post("/api/v1/agent/bind_memspace", req, &resp)
+	if err != nil {
+		return fmt.Errorf("bind memspace failed: %w", err)
+	}
+	if success, ok := resp["success"].(bool); !ok || !success {
+		msg := "unknown error"
+		if e, ok := resp["error"].(string); ok {
+			msg = e
+		}
+		return fmt.Errorf("bind memspace failed: %s", msg)
+	}
+	return nil
+}
+
+// UnbindMemSpace unbinds the agent from a MemSpace
+func (c *AgentClient) UnbindMemSpace(memspaceID uint64) error {
+	req := &api.UnbindMemSpaceRequest{
+		MemSpaceID: fmt.Sprintf("%d", memspaceID),
+	}
+	var resp map[string]interface{}
+	err := c.post("/api/v1/agent/unbind_memspace", req, &resp)
+	if err != nil {
+		return fmt.Errorf("unbind memspace failed: %w", err)
+	}
+	if success, ok := resp["success"].(bool); !ok || !success {
+		msg := "unknown error"
+		if e, ok := resp["error"].(string); ok {
+			msg = e
+		}
+		return fmt.Errorf("unbind memspace failed: %s", msg)
+	}
 	return nil
 }

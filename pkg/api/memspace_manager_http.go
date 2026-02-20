@@ -16,7 +16,7 @@ type ListMemSpacesResponseManager struct {
 }
 
 // BindMemSpace
-type BindMemSpaceRequest struct {
+type BindMemSpaceRequestMemManager struct {
 	AgentID    string `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
 }
@@ -26,7 +26,7 @@ type BindMemSpaceResponse struct {
 }
 
 // UnbindMemSpace
-type UnbindMemSpaceRequest struct {
+type UnbindMemSpaceRequestMemManager struct {
 	AgentID    string `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
 }

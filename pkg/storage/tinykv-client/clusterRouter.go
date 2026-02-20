@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/errorpb"
+	"google.golang.org/grpc"
 	"sync"
 	"time"
 
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
-	"google.golang.org/grpc"
 )
 
 type ClusterClient struct {

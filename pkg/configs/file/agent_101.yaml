@@ -2,7 +2,7 @@ agent_id: 101
 agent_manager_addr: "http://localhost:8080"
 memspace_manager_addr: "http://localhost:7000"
 chat_server_addr: "http://localhost:20001"
-vector_server_addr: "http://localhost:5000"
+vector_server_addr: "http://localhost:20002"
 role: "ResidentAgent"
 image: "nucleus-agent:v1"
 path: "/usr/bin/agent"

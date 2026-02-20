@@ -1,23 +1,24 @@
 package prompt
 
 import (
+	"NucleusMem/pkg/client"
 	"encoding/json"
 	"fmt"
 	"time"
 )
 
 type ChatPrompt struct {
-	Type        string        `json:"type"`
-	Version     string        `json:"version"`
-	Timestamp   int64         `json:"timestamp"`
-	System      string        `json:"system"`
-	Summary     string        `json:"summary"`      // 来自 SummaryRegion 的压缩记忆
-	TempHistory []ChatMessage `json:"temp_history"` // 短期对话历史
-	UserInput   string        `json:"user_input"`
+	Type        string               `json:"type"`
+	Version     string               `json:"version"`
+	Timestamp   int64                `json:"timestamp"`
+	System      string               `json:"system"`
+	Summary     string               `json:"summary"`      // 来自 SummaryRegion 的压缩记忆
+	TempHistory []client.ChatMessage `json:"temp_history"` // 短期对话历史
+	UserInput   string               `json:"user_input"`
 }
 
 // NewChatPrompt creates a new chat prompt with memory context
-func NewChatPrompt(system, summary, userInput string, tempHistory []ChatMessage) *ChatPrompt {
+func NewChatPrompt(system, summary, userInput string, tempHistory []client.ChatMessage) *ChatPrompt {
 	return &ChatPrompt{
 		Type:        "chat",
 		Version:     "v1",

@@ -5,7 +5,7 @@ owner_id: 0
 description: "Shared memory space for all agents"
 http_addr: "localhost:8081"
 pd_addr: "localhost:2379"
-embedding_client_addr: "http://localhost:5000"
-light_model_addr: "http://localhost:6000"
+embedding_client_addr: "http://localhost:20002"
+light_model_addr: "http://localhost:20001"
 summary_cnt: 5
 summary_threshold: 10

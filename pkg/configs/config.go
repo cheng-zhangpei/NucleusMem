@@ -28,9 +28,10 @@ type AgentManagerConfig struct {
 }
 
 type MonitorConfig struct {
-	NodeID          uint64 `yaml:"node_id"`
-	MonitorUrl      string `yaml:"monitor_url"`
-	AgentManagerUrl string `yaml:"agent_manager_url"`
+	NodeID          uint64            `yaml:"node_id"`
+	MonitorUrl      string            `yaml:"monitor_url"`
+	AgentManagerUrl string            `yaml:"agent_manager_url"`
+	agentsURLs      map[uint64]string `yaml:"agent_urls"`
 }
 
 // MemSpaceManagerConfig holds configuration for MemSpaceManager

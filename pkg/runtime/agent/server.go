@@ -3,10 +3,13 @@ package agent
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
 	"encoding/json"
 	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,7 +30,7 @@ func (s *AgentHTTPServer) handleTempChat(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// Submit as TempChat task
-	task := AgentTask{
+	task := &AgentTask{
 		Type:    TaskTypeTempChat,
 		Content: req.Message,
 	}
@@ -50,7 +53,7 @@ func (s *AgentHTTPServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit as Chat task
-	task := AgentTask{
+	task := &AgentTask{
 		Type:    TaskTypeChat,
 		Content: req.Message,
 	}
@@ -72,7 +75,7 @@ func (s *AgentHTTPServer) handleNotify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Submit as Comm task
-	task := AgentTask{
+	task := &AgentTask{
 		Type:    TaskTypeComm,
 		Key:     req.Key,
 		Content: req.Content,
@@ -134,6 +137,62 @@ func (s *AgentHTTPServer) handleShutdown(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(resp)
 }
 
+// POST /api/v1/agent/bind_memspace
+func (s *AgentHTTPServer) handleBindMemSpace(w http.ResponseWriter, r *http.Request) {
+	var req api.BindMemSpaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	memspaceID, err := strconv.ParseUint(req.MemSpaceID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid memspace_id", http.StatusBadRequest)
+		return
+	}
+
+	config := &configs.MemSpaceConfig{
+		MemSpaceID: memspaceID,
+		Type:       strings.ToLower(req.Type),
+		HttpAddr:   req.HttpAddr,
+	}
+
+	err = s.agent.bindingMemSpace(config)
+	resp := map[string]interface{}{
+		"success": err == nil,
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/agent/unbind_memspace
+func (s *AgentHTTPServer) handleUnbindMemSpace(w http.ResponseWriter, r *http.Request) {
+	var req api.UnbindMemSpaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	memspaceID, err := strconv.ParseUint(req.MemSpaceID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid memspace_id", http.StatusBadRequest)
+		return
+	}
+
+	err = s.agent.unBindingMemSpace(memspaceID)
+	resp := map[string]interface{}{
+		"success": err == nil,
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
 // Start initializes and starts the HTTP server
 // addr should be in the format "host:port" (e.g., ":8080")
 func (s *AgentHTTPServer) Start(addr string) error {
@@ -143,6 +202,8 @@ func (s *AgentHTTPServer) Start(addr string) error {
 	mux.HandleFunc("/api/v1/agent/health", s.handleHealth)
 	mux.HandleFunc("/api/v1/agent/shutdown", s.handleShutdown)
 	mux.HandleFunc("/api/v1/agent/notify", s.handleNotify)
+	mux.HandleFunc("/api/v1/agent/bind_memspace", s.handleBindMemSpace)
+	mux.HandleFunc("/api/v1/agent/unbind_memspace", s.handleUnbindMemSpace)
 
 	log.Infof("Agent HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
