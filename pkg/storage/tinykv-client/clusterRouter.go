@@ -99,7 +99,6 @@ func (c *ClusterClient) SendRequest(ctx context.Context, addr string, regionInfo
 				RegionEpoch: regionInfo.Region.RegionEpoch,
 				Peer:        regionInfo.Leader,
 			}
-			fmt.Println("Sending Prewrite...")
 			preResp, err := client.KvPrewrite(ctx, r)
 			if err != nil {
 				return nil, err

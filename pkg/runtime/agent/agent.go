@@ -110,7 +110,7 @@ func (a *Agent) TempChat(input string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Initialize with system message if empty
+	// Initialize system message if needed
 	if len(a.tempMemory) == 0 {
 		a.tempMemory = append(a.tempMemory, client.ChatMessage{
 			Role:    "system",
@@ -124,53 +124,43 @@ func (a *Agent) TempChat(input string) (string, error) {
 		Content: input,
 	})
 
-	// Safe truncation helper
+	// Truncate helper
 	truncateHistory := func() {
 		if a.maxHistory <= 0 {
 			return
 		}
-		// Ensure we keep at least the system message
-		minLen := 1
+		minLen := 1 // keep system
 		if len(a.tempMemory) <= minLen {
 			return
 		}
-		// Calculate how many messages to keep (including system)
 		keepCount := a.maxHistory
 		if keepCount < minLen {
 			keepCount = minLen
 		}
-		// If we have more messages than we want to keep
 		if len(a.tempMemory) > keepCount {
-			// Keep system message + most recent (keepCount - 1) messages
-			newHistory := make([]client.ChatMessage, keepCount)
-			newHistory[0] = a.tempMemory[0] // System message
-			copy(newHistory[1:], a.tempMemory[len(a.tempMemory)-(keepCount-1):])
-			a.tempMemory = newHistory
+			newHist := make([]client.ChatMessage, keepCount)
+			newHist[0] = a.tempMemory[0]
+			copy(newHist[1:], a.tempMemory[len(a.tempMemory)-(keepCount-1):])
+			a.tempMemory = newHist
 		}
 	}
-
-	// Truncate before sending to LLM
 	truncateHistory()
 
-	// Prepare request
+	// Unlock for LLM call
+	a.mu.Unlock()
 	req := client.ChatCompletionRequest{
 		Messages:    a.tempMemory,
 		Temperature: 0.7,
 		MaxTokens:   512,
 	}
-
-	// Make LLM call (unlock during network call)
-	a.mu.Unlock()
 	chatResp, err := a.chatClient.ChatCompletion(req)
 	a.mu.Lock()
 	if err != nil {
 		return "", err
 	}
-
 	if len(chatResp.Choices) == 0 {
 		return "", fmt.Errorf("no response from LLM")
 	}
-
 	response := chatResp.Choices[0].Message.Content
 
 	// Add assistant response
@@ -178,8 +168,6 @@ func (a *Agent) TempChat(input string) (string, error) {
 		Role:    "assistant",
 		Content: response,
 	})
-
-	// Final truncation after adding response
 	truncateHistory()
 
 	return response, nil
@@ -187,8 +175,85 @@ func (a *Agent) TempChat(input string) (string, error) {
 
 // Chat is the main chat interface
 func (a *Agent) Chat(input string) (string, error) {
-	// todo(cheng) after the memspace finished
-	return "nil", nil
+	if input == "" {
+		return "", fmt.Errorf("input cannot be empty")
+	}
+
+	// Step 1: Fetch context from all public MemSpaces
+	var allSummaries []string
+	var allMemories []string
+
+	a.mu.RLock()
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	a.mu.RUnlock()
+
+	for _, client := range publicClients {
+		if client == nil {
+			continue
+		}
+		summary, memories, err := client.GetMemoryContext(time.Now().Unix(), input, 5)
+		if err != nil {
+			log.Warnf("Failed to get context from public memspace: %v", err)
+			continue
+		}
+		if summary != "" {
+			allSummaries = append(allSummaries, summary)
+		}
+		allMemories = append(allMemories, memories...)
+	}
+	combinedSummary := ""
+	if len(allSummaries) > 0 {
+		combinedSummary = strings.Join(allSummaries, "\n---\n")
+	}
+
+	// Step 2: Get current temp history
+	a.mu.RLock()
+	tempHistory := make([]client.ChatMessage, len(a.tempMemory))
+	copy(tempHistory, a.tempMemory)
+	a.mu.RUnlock()
+
+	// Step 3: Build prompt
+	sysMsg := "You are an intelligent agent with access to shared memory and conversation history. Use both to answer the user's query."
+	promptObj := prompt.NewChatPrompt(sysMsg, combinedSummary, input, tempHistory)
+	promptStr, err := promptObj.Encode()
+	if err != nil {
+		return "", fmt.Errorf("failed to encode prompt: %w", err)
+	}
+
+	// Step 4: Call LLM
+	req := client.ChatCompletionRequest{
+		Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
+		Temperature: 0.7,
+		MaxTokens:   512,
+	}
+
+	resp, err := a.chatClient.ChatCompletion(req)
+	if err != nil {
+		return "", fmt.Errorf("LLM call failed: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from LLM")
+	}
+	response := resp.Choices[0].Message.Content
+
+	// Step 5: Update temp memory
+	a.mu.Lock()
+	a.tempMemory = append(a.tempMemory, client.ChatMessage{Role: "user", Content: input})
+	a.tempMemory = append(a.tempMemory, client.ChatMessage{Role: "assistant", Content: response})
+
+	// Optional: truncate if too long
+	if len(a.tempMemory) > a.maxHistory {
+		// Keep system message (index 0) + latest messages
+		newMem := make([]client.ChatMessage, a.maxHistory)
+		newMem[0] = a.tempMemory[0]
+		copy(newMem[1:], a.tempMemory[len(a.tempMemory)-(a.maxHistory-1):])
+		a.tempMemory = newMem
+	}
+	a.mu.Unlock()
+
+	log.Infof("Agent %d processed chat → %s", a.AgentId, response)
+	return response, nil
 }
 
 // Close is a no-op for HTTP clients (no persistent connections)
@@ -217,6 +282,7 @@ func (a *Agent) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case task := <-a.taskQueue:
+			log.Infof("the agent:%d start processing task:%s", a.AgentId, task.Type)
 			if err := a.handleTask(task); err != nil {
 				log.Errorf("Agent %d failed to handle task: %v", a.AgentId, err)
 			}
@@ -224,22 +290,34 @@ func (a *Agent) Start(ctx context.Context) error {
 	}
 }
 
-// handleTask 根据类型分发
 func (a *Agent) handleTask(task *AgentTask) error {
 	switch task.Type {
 	case TaskTypeComm:
-		// todo(cheng) after get the communicateInfo we should send it to task queue again
-		content, err := a.handleCommTask(task)
-		agentTask := &AgentTask{Type: TaskTypeChat, Key: "", Content: content, Timestamp: time.Now().Unix()}
-		err = a.handleTask(agentTask)
+		msg, err := a.handleCommTask(task)
 		if err != nil {
 			return err
 		}
-		return err
+		// Enqueue as Chat task
+		chatTask := &AgentTask{
+			Type:      TaskTypeChat,
+			Content:   msg,
+			Timestamp: time.Now().Unix(),
+		}
+		select {
+		case a.taskQueue <- chatTask:
+		default:
+			log.Warnf("Task queue full, dropping chat task")
+		}
+		return nil
+
 	case TaskTypeTempChat:
-		return a.handleTempChatTask(task)
+		_, err := a.TempChat(task.Content)
+		return err
+
 	case TaskTypeChat:
-		return a.handleChatTask(task)
+		_, err := a.Chat(task.Content)
+		return err
+
 	default:
 		return fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -253,9 +331,87 @@ func (a *Agent) SubmitTask(task *AgentTask) error {
 	return nil
 }
 func (a *Agent) handleChatTask(task *AgentTask) error {
+	content := task.Content
+	if content == "" {
+		return fmt.Errorf("chat task requires content")
+	}
+
+	var allSummaries []string
+	var allMemories []string
+
+	a.mu.RLock()
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	a.mu.RUnlock()
+
+	for _, client := range publicClients {
+		if client == nil {
+			continue
+		}
+		summary, memories, err := client.GetMemoryContext(time.Now().Unix(), content, 5)
+		if err != nil {
+			log.Warnf("Failed to get context from public memspace: %v", err)
+			continue
+		}
+		if summary != "" {
+			allSummaries = append(allSummaries, summary)
+		}
+		allMemories = append(allMemories, memories...)
+	}
+	combinedSummary := ""
+	if len(allSummaries) > 0 {
+		combinedSummary = strings.Join(allSummaries, "\n---\n")
+	}
+
+	a.mu.RLock()
+	tempHistory := make([]client.ChatMessage, len(a.tempMemory))
+	copy(tempHistory, a.tempMemory)
+	a.mu.RUnlock()
+
+	sysMsg := "You are an intelligent agent with access to shared memory and conversation history. Use both to answer the user's query."
+	promptObj := prompt.NewChatPrompt(
+		sysMsg,
+		combinedSummary,
+		content,
+		tempHistory,
+	)
+
+	promptStr, err := promptObj.Encode()
+	if err != nil {
+		return fmt.Errorf("failed to encode prompt: %w", err)
+	}
+
+	req := client.ChatCompletionRequest{
+		Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
+		Temperature: 0.7,
+		MaxTokens:   512,
+	}
+
+	resp, err := a.chatClient.ChatCompletion(req)
+	if err != nil {
+		return fmt.Errorf("LLM call failed: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return fmt.Errorf("no response from LLM")
+	}
+	response := resp.Choices[0].Message.Content
+
+	a.mu.Lock()
+	a.tempMemory = append(a.tempMemory, client.ChatMessage{
+		Role:    "user",
+		Content: content,
+	})
+	a.tempMemory = append(a.tempMemory, client.ChatMessage{
+		Role:    "assistant",
+		Content: response,
+	})
+	// 可加长度限制：if len(a.tempMemory) > a.maxHistory { ... }
+	a.mu.Unlock()
+
+	log.Infof("Agent %d processed chat task → %s", a.AgentId, response)
 	return nil
 }
-
 func (a *Agent) handleTempChatTask(task *AgentTask) error {
 	content := task.Content
 	if content == "" {
@@ -319,16 +475,16 @@ func (a *Agent) handleCommTask(task *AgentTask) (string, error) {
 			return "", fmt.Errorf("no memspace client available for comm task")
 		}
 		content, err = client.GetMemoryByKey([]byte(task.Key))
+		log.Debugf("get the content from memspace: %s", content)
 		if err != nil {
 			return "", fmt.Errorf("failed to get memory by key: %w", err)
 		}
 	}
-	response, err := a.Chat(content)
+
 	if err != nil {
-		return response, err
+		return content, err
 	}
-	log.Infof("Agent %d received comm task: %s", a.AgentId, content)
-	return "", nil
+	return content, nil
 }
 
 // bindingMemSpace binds the agent to a MemSpace (local only, no manager call)

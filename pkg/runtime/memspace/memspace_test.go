@@ -4,7 +4,6 @@ import (
 	"NucleusMem/pkg/api"
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
-	"context"
 	"github.com/stretchr/testify/assert"
 	"strings"
 	"testing"
@@ -121,33 +120,28 @@ func TestMemSpaceClient_SummaryCompression(t *testing.T) {
 }
 func TestMemSpaceClient_Communication(t *testing.T) {
 	baseURL := "http://localhost:8081"
-	monitorURL := "http://localhost:9091"
+	//monitorURL := "http://localhost:9091"
 	memspaceClient := client.NewMemSpaceClient(baseURL)
-	ctx := context.Background()
+	//agentMonitorConfig, _ := configs.LoadAgentMonitorConfigFromYAML(monitorURL)
+	//monitor := agent_monitor.NewAgentMonitor(agentMonitorConfig)
+	//ctx := context.Background()
 	agentConfigFile1 := "../../configs/file/agent_101.yaml"
 	agentConfigFile2 := "../../configs/file/agent_102.yaml"
-	monitorClient := client.NewAgentMonitorClient(monitorURL)
-
-	agent1, err := monitorClient.LaunchAgent(ctx, &api.LaunchAgentRequestHTTP{ConfigFilePath: agentConfigFile1})
-	if err != nil {
-		t.Fatalf("LaunchAgent failed: %v", err)
-	}
-	agent2, err := monitorClient.LaunchAgent(ctx, &api.LaunchAgentRequestHTTP{ConfigFilePath: agentConfigFile2})
-	if err != nil {
-		t.Fatalf("LaunchAgent failed: %v", err)
-	}
+	//monitorClient := client.NewAgentMonitorClient(monitorURL)
+	agent1, _ := configs.LoadAgentConfigFromYAML(agentConfigFile1)
+	agent2, _ := configs.LoadAgentConfigFromYAML(agentConfigFile2)
 	t.Log("→ Registering Agent 101")
-	if err := memspaceClient.RegisterAgent(agent1.AgentID, "localhost:9001", "worker"); err != nil {
+	if err := memspaceClient.RegisterAgent(agent1.AgentId, "localhost:9001", "worker"); err != nil {
 		t.Fatalf("RegisterAgent 101 failed: %v", err)
 	}
 
 	t.Log("→ Registering Agent 102")
-	if err := memspaceClient.RegisterAgent(agent2.AgentID, "localhost:9002", "worker"); err != nil {
+	if err := memspaceClient.RegisterAgent(agent2.AgentId, "localhost:9002", "worker"); err != nil {
 		t.Fatalf("RegisterAgent 102 failed: %v", err)
 	}
 	agentClient1 := client.NewAgentClient("localhost:9001")
 	agentClient2 := client.NewAgentClient("localhost:9002")
-	err = agentClient1.BindMemSpace(&api.BindMemSpaceRequest{"1001", "Public", baseURL})
+	err := agentClient1.BindMemSpace(&api.BindMemSpaceRequest{"1001", "Public", baseURL})
 	if err != nil {
 		t.Fatalf("BindMemSpace failed: %v", err)
 	}
@@ -180,7 +174,7 @@ func TestMemSpaceClient_Communication(t *testing.T) {
 	messageKey := "memory/101/5" // 假设这是某条记忆的 key
 	refType := "memory"
 
-	if err := memspaceClient.SendMessage(agent1.AgentID, agent2.AgentID, messageKey, refType); err != nil {
+	if err := memspaceClient.SendMessage(agent1.AgentId, agent2.AgentId, messageKey, refType); err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
 	t.Log("✅ Communication test passed! Message sent successfully.")

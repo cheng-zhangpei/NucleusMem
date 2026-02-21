@@ -1,3 +1,7 @@
-# MemSpaceMonitor Configuration for Node 1
 node_id: 1
-monitor_url: "localhost:9081"
+monitor_url: "http://localhost:9100"
+memspace_manager_url: "http://localhost:9200"
+memspace_urls:
+  1001: "http://localhost:8081"
+#  1002: "http://localhost:8082"
+#  1003: "http://localhost:8083"

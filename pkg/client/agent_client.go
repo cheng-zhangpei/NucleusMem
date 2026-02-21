@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"NucleusMem/pkg/api"
@@ -18,6 +20,9 @@ type AgentClient struct {
 }
 
 func NewAgentClient(baseURL string) *AgentClient {
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
 	return &AgentClient{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -31,7 +36,11 @@ func (c *AgentClient) post(endpoint string, req interface{}, resp interface{}) e
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s%s", c.BaseURL, endpoint)
+	url, err := url.JoinPath(c.baseURL, endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
 	httpResp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)

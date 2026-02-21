@@ -1,0 +1,11 @@
+memspace_id: 1003
+name: "Public Memory Space"
+type: "public"
+owner_id: 0
+description: "Shared memory space for all agents"
+http_addr: "localhost:8083"
+pd_addr: "localhost:2379"
+embedding_client_addr: "http://localhost:20002"
+light_model_addr: "http://localhost:20001"
+summary_cnt: 5
+summary_threshold: 10

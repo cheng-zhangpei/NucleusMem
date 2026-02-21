@@ -2,6 +2,9 @@
   <profile version="1.0">
     <option name="myName" value="Project Default" />
     <inspection_tool class="GoDfaErrorMayBeNotNil" enabled="true" level="WARNING" enabled_by_default="true">
+      <functions>
+        <function importPath="NucleusMem/pkg/configs" name="LoadMemSpaceConfigFromYAML" />
+      </functions>
       <methods>
         <method importPath="NucleusMem/pkg/controller/agent_manager" receiver="*AgentManager" name="LaunchAgentOnNode" />
         <method importPath="NucleusMem/pkg/client" receiver="*AgentMonitorClient" name="LaunchAgent" />

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,9 @@ type MemSpaceClient struct {
 
 // NewMemSpaceClient creates a new MemSpace client
 func NewMemSpaceClient(baseURL string) *MemSpaceClient {
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
 	return &MemSpaceClient{
 		BaseURL: baseURL,
 		httpClient: &http.Client{

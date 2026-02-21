@@ -153,7 +153,7 @@ func (s *MemSpaceMonitorHTTPServer) handleListMemSpaces(w http.ResponseWriter, r
 			OwnerID:     fmt.Sprintf("%d", info.OwnerID),
 			Type:        info.Type,
 			Status:      info.Status,
-			Addr:        info.Addr,
+			HttpAddr:    info.Addr,
 			Description: info.Description,
 			LastSeen:    info.LastSeen,
 		}

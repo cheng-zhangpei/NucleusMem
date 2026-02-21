@@ -13,9 +13,9 @@ import (
 func main() {
 	// Print working directory
 	if wd, err := os.Getwd(); err != nil {
-		log.Infof("Failed to get working directory: %v\n", err)
+		log.Infof("Failed to get working directory: %v", err)
 	} else {
-		log.Infof("Current working directory: %s\n", wd)
+		log.Infof("Current working directory: %s", wd)
 	}
 
 	// Parse command-line flags
