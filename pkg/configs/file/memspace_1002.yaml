@@ -3,7 +3,7 @@ name: "Public Memory Space"
 type: "public"
 owner_id: 0
 description: "Shared memory space for all agents"
-http_addr: "localhost:8082"
+http_addr: "localhost:10003"
 pd_addr: "localhost:2379"
 embedding_client_addr: "http://localhost:20002"
 light_model_addr: "http://localhost:20001"

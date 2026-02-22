@@ -1,5 +1,5 @@
 node_id: 1
-monitor_url: "http://localhost:9100"
+monitor_url: "http://localhost:9111"
 memspace_manager_url: "http://localhost:9200"
 memspace_urls:
   1001: "http://localhost:8081"

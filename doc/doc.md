@@ -104,7 +104,7 @@ Since every communication action is fundamentally a storage transaction, Nucleus
 ├── tinykv/                 # [Submodule] TinyKV source code
 └── Dockerfile              # For building container images
 ```
-the system have 2 essential components, controllers and resources. 
+the system have 2 essential components, controllers and resources.
 - controllers: AgentManager(control the agents) and MemSpaceController(control the memSpaces)
 - resource:Agent and MemSpace
 
@@ -116,12 +116,12 @@ To manage resources across a distributed cluster (before fully transitioning to 
 
 
 *   **Cluster Level (The Managers):**
-  *   **AgentManager & MemSpaceManager:** Deployed on master nodes. They serve as the central brain, maintaining global metadata, routing tables, and resource allocation strategies.
-  *   **Role:** When an Agent needs to access memory, it requests the MemSpaceManager to "mount" a specific MemSpace. The manager updates the routing info, allowing the Agent to establish a direct gRPC link to the target storage.
+*   **AgentManager & MemSpaceManager:** Deployed on master nodes. They serve as the central brain, maintaining global metadata, routing tables, and resource allocation strategies.
+*   **Role:** When an Agent needs to access memory, it requests the MemSpaceManager to "mount" a specific MemSpace. The manager updates the routing info, allowing the Agent to establish a direct gRPC link to the target storage.
 
 *   **Node Level (The Monitors):**
-  *   **AgentMonitor & MemSpaceMonitor:** Deployed as daemons on every compute node.
-  *   **Role:** They act as local executives. They receive instructions from the central Managers (e.g., "Start Agent A", "Stop MemSpace B") and report local resource status and heartbeats back to the cluster.
+*   **AgentMonitor & MemSpaceMonitor:** Deployed as daemons on every compute node.
+*   **Role:** They act as local executives. They receive instructions from the central Managers (e.g., "Start Agent A", "Stop MemSpace B") and report local resource status and heartbeats back to the cluster.
 
 ![cluster_arch](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/distributed_arch.png)
 
@@ -203,8 +203,8 @@ When the user calls `txn.Commit()`, the client first enters the Prewrite phase. 
 1. **Batch Grouping**: The client iterates through the local write buffer (`puts` and `deletes`). Using the `ClusterRouter`, it groups mutations by their target **Region**. This is crucial because a `KvPrewrite` RPC can only be sent to the Leader of a specific Region.
 2. **Primary Key Selection**: The client selects one key as the **Primary Key** (currently, the first key in the buffer). This key's status determines the fate of the entire transaction.(For now, I just maintain the first key of the transaction as the primary key.)
 3. Parallel Execution: The client sends KvPrewrite requests to all relevant Region Leaders.
-  - **Conflict Check**: If the server returns a `WriteConflict` (meaning another transaction committed after our StartTS), the client aborts immediately.
-  - **Lock Resolution**: If the server returns `KeyLocked`, the client attempts to resolve the lock (querying the status of the lock's Primary Key via `KvCheckTxnStatus` and cleaning it up via `KvResolveLock`) before retrying.
+- **Conflict Check**: If the server returns a `WriteConflict` (meaning another transaction committed after our StartTS), the client aborts immediately.
+- **Lock Resolution**: If the server returns `KeyLocked`, the client attempts to resolve the lock (querying the status of the lock's Primary Key via `KvCheckTxnStatus` and cleaning it up via `KvResolveLock`) before retrying.
 4. **Rollback**: If any Region fails to prewrite (e.g., due to unresolvable conflict or network partition), the client initiates a `Rollback` operation for all keys to clean up partial locks.
 
 - Phase 2: Commit (Making it Visible)
@@ -212,9 +212,9 @@ When the user calls `txn.Commit()`, the client first enters the Prewrite phase. 
 Once all Prewrites succeed, the transaction is considered "locked". The client then proceeds to make the changes visible.
 
 1. Commit Primary: The client requests a CommitTSfrom the TSO (Timestamp Oracle,But now the project just use localTimeStamp). It then sends a KvCommit request only for the Primary Key.
-  - **Point of No Return**: If the Primary Key is successfully committed, the transaction is logically successful. Even if the client crashes afterwards, other transactions can roll forward the secondary keys by checking the Primary's status.
+- **Point of No Return**: If the Primary Key is successfully committed, the transaction is logically successful. Even if the client crashes afterwards, other transactions can roll forward the secondary keys by checking the Primary's status.
 2. Commit Secondaries (Async): After the Primary commit succeeds, the client sendsKvCommitrequests for all remaining keys (Secondary Keys).
-  - **Optimization**: This step is performed asynchronously. Since the transaction is already logically committed, failures here are non-fatal (locks will be resolved lazily by future readers).
+- **Optimization**: This step is performed asynchronously. Since the transaction is already logically committed, failures here are non-fatal (locks will be resolved lazily by future readers).
 
 This client-side coordination ensures **Snapshot Isolation (SI)** and **Atomicity** across multiple distributed nodes, providing a robust consistency guarantee for the upper-level Agent Memory system.
 
@@ -328,16 +328,118 @@ Summary Region stores compressed snapshots of Memory Region to resolve the confl
 
 **Passive References**: Agents are not actively notified upon Summary generation. Agents access the Summary Region under two conditions: 1. When an Agent proactively queries for historical context. 2. When directed by another Agent via the Comm Region—where the directing Agent sends a key reference to the Summary Region through a Watcher, prompting the receiving Agent to retrieve the corresponding summary content.
 
-#### 2.3.2 Dynamic Task Decomposition Model
-
 ### 2.4 Agent
 
 At its core, Agent operates on a task queue-driven execution model. All external requests—such as user conversations, collaboration notifications, and more—are encapsulated as tasks and submitted to an internal queue. These tasks are then processed sequentially by background coroutines.
+
+![cluster_arch](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/agent_arch.png)
 
 Each task carries a type identifier (e.g., temp_chat, comm, chat), enabling Agent to invoke distinct processing logic based on the type. This design makes adding new task types (such as tool invocations or scheduled tasks) remarkably straightforward—simply register a new handler.
 
 Although tasks are processed in submission order, strict end-to-end sequencing cannot be guaranteed due to network and external service latency. However, this approximate ordering suffices for most scenarios (e.g., conversations, memory writes).
 Agent itself does not store business state. All persistent data is managed through MemSpace, while Agent maintains only temporary conversation context and task scheduling logic.
+
+> The Agent architecture can be extended to support multi-level queue scheduling, ensuring tasks with varying workloads are distributed effectively. However, as this is a demo, we won't elaborate further here.
+
+### 2.5 Task Decomposition
+
+#### 2.5.1 ViewSpace And ViewSpace Tree
+
+In NucleusMem, complex tasks are decomposed and executed through a structure called the **ViewSpace Tree**. The core insight behind this design is that **the boundary of a task and the boundary of its collaboration space should be the same thing**. Each node in the tree is simultaneously a task decomposition unit and an isolated execution environment.
+
+A ViewSpace is defined as:
+
+```tex
+ViewSpace = Represented Agent (coordinator)
+          + Worker Agents (executors)  
+          + MemSpace (shared blackboard)
+          + Input/Output Contract
+```
+
+This is analogous to a self-contained "room" where a group of agents collaborate on a bounded sub-problem. All communication within a ViewSpace happens through its dedicated MemSpace, following the blackboard pattern described in §1.2.2. No direct message passing between agents is required.
+
+**Two Forms of ViewSpace**
+
+A ViewSpace exists in exactly one of two forms:
+
+**Composite ViewSpace** — A coordination unit that contains child ViewSpaces. Its Represented Agent is responsible for decomposing the task, spawning children, and aggregating their results. It does not directly execute work itself.
+
+**Atomic ViewSpace** — The minimal execution unit. It contains no child ViewSpaces. Its agents directly perform work using tools and write results to the shared MemSpace. An Atomic ViewSpace is determined by the following termination criteria (defined at the system level, not by the LLM):
+
+```tex
+A ViewSpace is Atomic if any of the following holds:
+  · The task can be fully described within a single LLM context window
+  · The task involves only tool calls with no further planning required
+  · The task requires only a single agent role
+```
+
+**The ViewSpace Tree**
+
+A task decomposition is represented as a **ViewSpace Tree**: a rooted, ordered tree where each node is a ViewSpace. The tree is dynamically generated at runtime by the Represented Agent of the root node, and may be recursively deepened as composite nodes spawn their own children.
+
+```
+Root ViewSpace (Composite)
+├── Child A (Composite)
+│   ├── Child A1 (Atomic)  ← actual work happens here
+│   └── Child A2 (Atomic)
+└── Child B (Atomic)
+```
+
+**Key structural properties**
+
+- **Isolation**: Each ViewSpace has its own dedicated MemSpace. A failure within one ViewSpace does not directly corrupt the state of sibling nodes.
+- **Contract enforcement**: Every ViewSpace declares an input contract (what it requires) and an output contract (what it promises to produce). These contracts are written into the MemSpace at creation time and are immutable. The internal complexity of a ViewSpace is invisible to its parent — only the output contract matters.
+- **Bottom-up completion**: A Composite ViewSpace is considered complete only when all of its child ViewSpaces have fulfilled their output contracts. Completion signals propagate upward through the tree.
+
+The execution of a ViewSpace Tree follows a recursive pattern:
+
+```
+execute(ViewSpace):
+  if Atomic:
+    agents read input from MemSpace
+    agents perform work (LLM inference + tool calls)
+    agents write result to MemSpace (fulfilling output contract)
+    signal completion to parent
+    
+  if Composite:
+    Represented Agent reads input contract
+    Represented Agent calls LLM to decompose task → generates child ViewSpace definitions (JSON)
+    for each child: create ViewSpace, mount MemSpace, assign agents
+    wait for all children to signal completion (respecting dependency order)
+    Represented Agent aggregates child outputs
+    write aggregated result to own MemSpace (fulfilling output contract)
+    signal completion to parent
+```
+
+Cross-sibling dependencies (e.g., Child A2 depends on Child A1's output) are expressed as a partial order within the parent's MemSpace. The parent's Represented Agent is responsible for respecting this order when spawning children.
+
+#### Known Limitations and Open Problems
+
+The current design acknowledges several unresolved challenges that are deferred beyond the demo phase:
+
+**Decomposition reliability**: The quality of the ViewSpace Tree is entirely dependent on the LLM's output. There is no built-in mechanism to evaluate whether a decomposition is well-formed in terms of granularity consistency or completeness. Malformed decompositions (e.g., circular dependencies, mismatched contracts) must be caught at parse time and returned to the LLM for correction.
+
+**Dynamic re-decomposition**: If a child ViewSpace discovers mid-execution that the task was incorrectly scoped, the protocol for modifying the tree (in-place mutation vs. subtree replacement) is not yet defined.
+
+**Cross-sibling communication**: The current model routes all inter-sibling communication through the parent's MemSpace. For deeply nested trees this introduces latency and complexity that has not been fully analyzed.
+
+#### 2.5.2 Parsers and Generators
+
+#### 2.5.4 regulation
+
+#### 2.5.5 authority
+
+> **todo**: after the demo finished.
+>
+> *Known open problems to address in this section:*
+>
+> - *Read/write permission model across nested ViewSpace boundaries (a child ViewSpace should not be able to write to its parent's or sibling's MemSpace)*
+> - *How permission grants are propagated when a parent passes a reference to a child*
+> - *Security audit trail: since all state lives in MemSpace, audit is structurally possible but the access control model needs to be formally defined first*
+
+
+
+
 
 ## 3. Future
 

@@ -21,30 +21,6 @@ func NewMemSpaceManagerHTTPServer(manager *MemSpaceManager) *MemSpaceManagerHTTP
 	return &MemSpaceManagerHTTPServer{manager: manager}
 }
 
-// POST /api/v1/manager/list_memspaces
-func (s *MemSpaceManagerHTTPServer) handleListMemSpaces(w http.ResponseWriter, r *http.Request) {
-	memspaces := s.manager.ListMemSpaceInfo()
-	// Convert to API format
-	apiMemspaces := make([]api.MemSpaceInfo, len(memspaces))
-	for i, ms := range memspaces {
-		apiMemspaces[i] = api.MemSpaceInfo{
-			MemSpaceID:  fmt.Sprintf("%d", ms.MemSpaceID),
-			Name:        ms.Name,
-			OwnerID:     fmt.Sprintf("%d", ms.OwnerAgentID),
-			Type:        ms.Type,
-			Status:      ms.Status,
-			HttpAddr:    ms.HttpAddr,
-			Description: "", // Add if needed
-			LastSeen:    ms.CreatedAt,
-		}
-	}
-	resp := api.ListMemSpacesResponse{
-		Success:   true,
-		MemSpaces: apiMemspaces,
-	}
-	json.NewEncoder(w).Encode(resp)
-}
-
 // POST /api/v1/manager/bind_memspace
 func (s *MemSpaceManagerHTTPServer) handleBindMemSpace(w http.ResponseWriter, r *http.Request) {
 	var req api.BindMemSpaceRequest
@@ -52,7 +28,7 @@ func (s *MemSpaceManagerHTTPServer) handleBindMemSpace(w http.ResponseWriter, r 
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	agentID, err := strconv.ParseUint(req.AgentID, 10, 64)
+	agentID, err := strconv.ParseUint(strconv.FormatUint(req.AgentID, 10), 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid agent_id", http.StatusBadRequest)
 		return
@@ -79,7 +55,7 @@ func (s *MemSpaceManagerHTTPServer) handleUnbindMemSpace(w http.ResponseWriter, 
 		return
 	}
 
-	agentID, err := strconv.ParseUint(req.AgentID, 10, 64)
+	agentID, err := strconv.ParseUint(strconv.FormatUint(req.AgentID, 10), 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid agent_id", http.StatusBadRequest)
 		return
@@ -162,6 +138,7 @@ func (s *MemSpaceManagerHTTPServer) handleNotifyMemSpaces(w http.ResponseWriter,
 	}
 
 	// Update cache
+	log.Infof("receive notify memspace request: %v", req)
 	for _, ms := range req.MemSpaces {
 		memspaceID, _ := strconv.ParseUint(ms.MemSpaceID, 10, 64)
 		ownerID, _ := strconv.ParseUint(ms.OwnerID, 10, 64)
@@ -179,8 +156,37 @@ func (s *MemSpaceManagerHTTPServer) handleNotifyMemSpaces(w http.ResponseWriter,
 		}
 		s.manager.memSpaceCache.UpdateMemSpace(cacheInfo)
 	}
-
+	info := s.manager.ListMemSpaceInfo()
+	for _, info := range info {
+		log.Infof("memspace info: %v", info)
+	}
 	resp := api.NotifyMemSpacesResponse{Success: true}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// GET /api/v1/manager/list_memspaces
+func (s *MemSpaceManagerHTTPServer) handleListMemSpaces(w http.ResponseWriter, r *http.Request) {
+	memspaces := s.manager.ListMemSpaceInfo()
+
+	// 转为 API 格式
+	apiList := make([]api.MemSpaceInfo, len(memspaces))
+	for i, ms := range memspaces {
+		apiList[i] = api.MemSpaceInfo{
+			MemSpaceID:  fmt.Sprintf("%d", ms.MemSpaceID),
+			Name:        ms.Name,
+			OwnerID:     fmt.Sprintf("%d", ms.OwnerAgentID),
+			Type:        ms.Type,
+			Status:      ms.Status,
+			HttpAddr:    ms.HttpAddr,
+			Description: "", // 可选：从配置中补充
+			LastSeen:    ms.CreatedAt,
+		}
+	}
+
+	resp := map[string]interface{}{
+		"success":   true,
+		"memspaces": apiList,
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 

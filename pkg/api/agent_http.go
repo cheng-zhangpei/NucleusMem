@@ -52,11 +52,13 @@ type NotifyResponse struct {
 // BindMemSpaceRequest is used to bind an agent to a MemSpace
 type BindMemSpaceRequest struct {
 	MemSpaceID string `json:"memspace_id"`
+	AgentID    uint64 `json:"agent_id"`
 	Type       string `json:"type"` // "private" or "public"
 	HttpAddr   string `json:"http_addr"`
 }
 
 // UnbindMemSpaceRequest is used to unbind an agent from a MemSpace
 type UnbindMemSpaceRequest struct {
+	AgentID    uint64 `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
 }

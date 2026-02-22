@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"NucleusMem/pkg/api"
@@ -19,6 +20,9 @@ type MemSpaceMonitorClient struct {
 
 // NewMemSpaceMonitorClient creates a new MemSpaceMonitor client
 func NewMemSpaceMonitorClient(baseURL string) *MemSpaceMonitorClient {
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
 	return &MemSpaceMonitorClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{

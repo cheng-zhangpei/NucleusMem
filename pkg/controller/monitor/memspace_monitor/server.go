@@ -8,6 +8,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // MemSpaceMonitorHTTPServer handles HTTP requests for MemSpaceMonitor
@@ -171,7 +172,8 @@ func (s *MemSpaceMonitorHTTPServer) handleHealth(w http.ResponseWriter, r *http.
 // Start initializes and starts the HTTP server
 func (s *MemSpaceMonitorHTTPServer) Start(addr string) error {
 	mux := http.NewServeMux()
-
+	addr = strings.TrimPrefix(addr, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
 	// MemSpace management
 	mux.HandleFunc("/api/v1/monitor/launch_memspace", s.handleLaunchMemSpace)
 	mux.HandleFunc("/api/v1/monitor/stop_memspace", s.handleStopMemSpace)

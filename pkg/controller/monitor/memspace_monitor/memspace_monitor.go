@@ -239,11 +239,12 @@ func (mm *MemSpaceMonitor) reportToManager() {
 		}
 	}
 	// Send to manager
+
 	err := mm.managerClient.NotifyMemSpaceUpdate(updates)
 	if err != nil {
 		log.Warnf("Failed to notify manager: %v", err)
 	} else {
-		log.Infof("Successfully reported %d memspaces to manager", len(updates))
+		//log.Infof("Successfully reported %d memspaces to manager", len(updates))
 	}
 }
 
