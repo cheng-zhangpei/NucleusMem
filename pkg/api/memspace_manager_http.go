@@ -15,22 +15,25 @@ type ListMemSpacesResponseManager struct {
 	MemSpaces []MemSpaceInfo `json:"memspaces"`
 }
 
-// BindMemSpace
-type BindMemSpaceRequestMemManager struct {
+type BindMemSpaceRequestManager struct {
 	AgentID    string `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
+	Addr       string `json:"addr"` // Agent HTTP address
+	Role       string `json:"role"` // Agent role
 }
-type BindMemSpaceResponse struct {
+
+// BindMemSpaceResponse is the response for bind operation
+type BindMemSpaceResponseManager struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // UnbindMemSpace
-type UnbindMemSpaceRequestMemManager struct {
+type UnbindMemSpaceRequestManager struct {
 	AgentID    string `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
 }
-type UnbindMemSpaceResponse struct {
+type UnbindMemSpaceResponseManager struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }

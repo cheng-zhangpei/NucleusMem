@@ -15,6 +15,12 @@ import (
 	"time"
 )
 
+type AgentBinding struct {
+	AgentID uint64
+	Addr    string
+	Role    string
+	BoundAt int64
+}
 type MemSpaceType string
 
 const (
@@ -42,7 +48,7 @@ type MemSpace struct {
 	mu                sync.RWMutex
 	kvClient          *tinykv_client.MemClient
 	status            configs.MemSpaceStatus
-	boundAgents       map[uint64]bool
+	boundAgents       map[uint64]*AgentBinding
 	httpAddr          string
 }
 
@@ -55,7 +61,6 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 	if config.Type != "private" && config.Type != "public" {
 		return nil, errors.New("type must be 'private' or 'public'")
 	}
-
 	// Set defaults
 	summaryCnt := config.SummaryCnt
 	if summaryCnt == 0 {
@@ -100,7 +105,7 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 		CommRegion:       memspace_region.NewCommRegion(kvClient, config.MemSpaceID),
 		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, chatServerClient, config.MemSpaceID),
 		status:           configs.MemSpaceStatusInactive,
-		boundAgents:      make(map[uint64]bool),
+		boundAgents:      make(map[uint64]*AgentBinding),
 		httpAddr:         config.HttpAddr,
 	}
 
@@ -225,11 +230,12 @@ func (m *MemSpace) UnRegisterAgent(agentID uint64) error {
 	}
 	return m.CommRegion.UnregisterAgent(agentID)
 }
-func (m *MemSpace) SendMessage(fromAgent, toAgent uint64, key, refType string) error {
+func (m *MemSpace) SendMessage(fromAgent, toAgent uint64, key, content string) (string, error) {
 	if m.Type == MemSpaceTypePrivate {
-		return fmt.Errorf("the memspace type is private")
+		return "", fmt.Errorf("the memspace type is private")
 	}
-	return m.CommRegion.SendMessage(fromAgent, toAgent, key, refType)
+
+	return m.CommRegion.SendMessage(fromAgent, toAgent, key, content)
 }
 func (m *MemSpace) ListAgents() []memspace_region.AgentRegistryEntry {
 	if m.Type == MemSpaceTypePrivate {
@@ -238,15 +244,49 @@ func (m *MemSpace) ListAgents() []memspace_region.AgentRegistryEntry {
 	return m.CommRegion.ListAgents()
 }
 
-func (m *MemSpace) BindAgent(agentID uint64) error {
+// BindAgent binds an agent to this MemSpace and registers in CommRegion
+func (m *MemSpace) BindAgent(agentID uint64, addr, role string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.boundAgents[agentID] = true
+	// 1. 检查是否已绑定
+	if _, exists := m.boundAgents[agentID]; exists {
+		return fmt.Errorf("agent %d already bound to memspace %s", agentID, m.ID)
+	}
+	// 2. 权限控制：根据 MemSpace 类型判断是否允许绑定
+	if m.Type == MemSpaceTypePrivate {
+		// Private MemSpace 只能绑定 OwnerID 对应的 Agent
+		if agentID != m.OwnerID {
+			return fmt.Errorf("private memspace %s can only be bound by owner (agent %d), got agent %d",
+				m.ID, m.OwnerID, agentID)
+		}
+	}
+	// Public MemSpace 允许任意 Agent 绑定（无额外限制）
+	// 3. 添加到绑定列表
+	m.boundAgents[agentID] = &AgentBinding{
+		AgentID: agentID,
+		Addr:    addr,
+		Role:    role,
+		BoundAt: time.Now().Unix(),
+	}
+
+	// 4. 更新状态
 	if m.status == configs.MemSpaceStatusInactive {
 		m.status = configs.MemSpaceStatusActive
-		log.Infof("MemSpace %s activated by agent %d", m.ID, agentID)
+		log.Infof("MemSpace %s activated (agent %d bound)", m.ID, agentID)
 	}
+
+	// 5. 注册到通讯区（仅 Public MemSpace）
+	if m.Type == MemSpaceTypePublic {
+		m.mu.Unlock()
+		if err := m.CommRegion.RegisterAgent(agentID, addr, role); err != nil {
+			log.Warnf("Failed to register agent %d in comm region: %v", agentID, err)
+		}
+		m.mu.Lock()
+	}
+
+	log.Infof("Agent %d bound to MemSpace %s (addr: %s, role: %s, type: %s)",
+		agentID, m.ID, addr, role, m.Type)
 	return nil
 }
 func (ms *MemSpace) GetByKey(rawKey []byte) ([]byte, error) {
@@ -265,16 +305,40 @@ func (ms *MemSpace) GetByKey(rawKey []byte) ([]byte, error) {
 	return value, nil
 }
 
-// UnBindAgent unbinds an agent from this MemSpace and updates status
 func (m *MemSpace) UnBindAgent(agentID uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// 1. 检查是否存在
+	if _, exists := m.boundAgents[agentID]; !exists {
+		return fmt.Errorf("agent %d not bound to memspace %s", agentID, m.ID)
+	}
+
+	// 2. 权限控制：Private MemSpace 只能由 Owner 解绑
+	if m.Type == MemSpaceTypePrivate && agentID != m.OwnerID {
+		return fmt.Errorf("private memspace %s can only be unbound by owner (agent %d), got agent %d",
+			m.ID, m.OwnerID, agentID)
+	}
+
+	// 3. 从绑定列表删除
 	delete(m.boundAgents, agentID)
+
+	// 4. 更新状态
 	if len(m.boundAgents) == 0 && m.status == configs.MemSpaceStatusActive {
 		m.status = configs.MemSpaceStatusInactive
 		log.Infof("MemSpace %s deactivated (no agents bound)", m.ID)
 	}
+
+	// 5. 从通讯区注销（仅 Public MemSpace）
+	if m.Type == MemSpaceTypePublic {
+		m.mu.Unlock()
+		if err := m.CommRegion.UnregisterAgent(agentID); err != nil {
+			log.Warnf("Failed to unregister agent %d from comm region: %v", agentID, err)
+		}
+		m.mu.Lock()
+	}
+
+	log.Infof("Agent %d unbound from MemSpace %s", agentID, m.ID)
 	return nil
 }
 

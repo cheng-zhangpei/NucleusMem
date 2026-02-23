@@ -23,23 +23,38 @@ func NewMemSpaceManagerHTTPServer(manager *MemSpaceManager) *MemSpaceManagerHTTP
 
 // POST /api/v1/manager/bind_memspace
 func (s *MemSpaceManagerHTTPServer) handleBindMemSpace(w http.ResponseWriter, r *http.Request) {
-	var req api.BindMemSpaceRequest
+	var req api.BindMemSpaceRequestManager
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-	agentID, err := strconv.ParseUint(strconv.FormatUint(req.AgentID, 10), 10, 64)
+
+	// 验证必填字段
+	if req.Addr == "" {
+		http.Error(w, "addr is required", http.StatusBadRequest)
+		return
+	}
+	if req.Role == "" {
+		http.Error(w, "role is required", http.StatusBadRequest)
+		return
+	}
+
+	agentID, err := strconv.ParseUint(req.AgentID, 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid agent_id", http.StatusBadRequest)
 		return
 	}
+
 	memspaceID, err := strconv.ParseUint(req.MemSpaceID, 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid memspace_id", http.StatusBadRequest)
 		return
 	}
-	err = s.manager.BindMemSpaceToAgent(agentID, memspaceID)
-	resp := api.BindMemSpaceResponse{Success: err == nil}
+
+	// 调用 Manager 绑定方法（传入 addr 和 role）
+	err = s.manager.BindMemSpaceToAgent(agentID, memspaceID, req.Role, req.Addr)
+
+	resp := api.BindMemSpaceResponseManager{Success: err == nil}
 	if err != nil {
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
@@ -68,7 +83,7 @@ func (s *MemSpaceManagerHTTPServer) handleUnbindMemSpace(w http.ResponseWriter, 
 	}
 
 	err = s.manager.UnBindMemSpaceWithAgent(agentID, memspaceID)
-	resp := api.UnbindMemSpaceResponse{Success: err == nil}
+	resp := api.UnbindMemSpaceResponseManager{Success: err == nil}
 	if err != nil {
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
@@ -138,7 +153,7 @@ func (s *MemSpaceManagerHTTPServer) handleNotifyMemSpaces(w http.ResponseWriter,
 	}
 
 	// Update cache
-	log.Infof("receive notify memspace request: %v", req)
+	//log.Infof("[memspace_manager]receive notify memspace request: %v", req)
 	for _, ms := range req.MemSpaces {
 		memspaceID, _ := strconv.ParseUint(ms.MemSpaceID, 10, 64)
 		ownerID, _ := strconv.ParseUint(ms.OwnerID, 10, 64)
@@ -156,10 +171,10 @@ func (s *MemSpaceManagerHTTPServer) handleNotifyMemSpaces(w http.ResponseWriter,
 		}
 		s.manager.memSpaceCache.UpdateMemSpace(cacheInfo)
 	}
-	info := s.manager.ListMemSpaceInfo()
-	for _, info := range info {
-		log.Infof("memspace info: %v", info)
-	}
+	//info := s.manager.ListMemSpaceInfo()
+	//for _, info := range info {
+	//	//log.Infof("memspace info: %v", info)
+	//}
 	resp := api.NotifyMemSpacesResponse{Success: true}
 	json.NewEncoder(w).Encode(resp)
 }

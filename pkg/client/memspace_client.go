@@ -125,22 +125,22 @@ func (c *MemSpaceClient) UnregisterAgent(agentID uint64) error {
 }
 
 // SendMessage sends a collaboration message
-func (c *MemSpaceClient) SendMessage(fromAgent, toAgent uint64, key, refType string) error {
+func (c *MemSpaceClient) SendMessage(fromAgent, toAgent uint64, key, content string) (string, error) {
 	req := api.SendMessageRequest{
 		FromAgent: fmt.Sprintf("%d", fromAgent),
 		ToAgent:   fmt.Sprintf("%d", toAgent),
 		Key:       key,
-		RefType:   refType,
+		Content:   content,
 	}
 	var resp api.SendMessageResponse
 	err := c.post("/api/v1/memspace/send_message", req, &resp)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !resp.Success {
-		return fmt.Errorf("send message failed: %s", resp.ErrorMessage)
+		return "", fmt.Errorf("send message failed: %s", resp.ErrorMessage)
 	}
-	return nil
+	return resp.Response, nil
 }
 
 // ListAgents returns all registered agents
@@ -185,15 +185,19 @@ func (c *MemSpaceClient) Shutdown() error {
 }
 
 // BindAgent binds an agent to this MemSpace
-func (c *MemSpaceClient) BindAgent(agentID uint64) error {
+func (c *MemSpaceClient) BindAgent(agentID uint64, addr, role string) error {
 	req := api.BindAgentRequest{
 		AgentID: fmt.Sprintf("%d", agentID),
+		Addr:    addr,
+		Role:    role,
 	}
 	var resp api.BindAgentResponse
+
 	err := c.post("/api/v1/memspace/bind_agent", req, &resp)
 	if err != nil {
-		return err
+		return fmt.Errorf("bind agent failed: %w", err)
 	}
+
 	if !resp.Success {
 		return fmt.Errorf("bind agent failed: %s", resp.ErrorMessage)
 	}
@@ -208,7 +212,7 @@ func (c *MemSpaceClient) UnbindAgent(agentID uint64) error {
 	var resp api.UnbindAgentResponse
 	err := c.post("/api/v1/memspace/unbind_agent", req, &resp)
 	if err != nil {
-		return err
+		return fmt.Errorf("unbind agent failed: %w", err)
 	}
 	if !resp.Success {
 		return fmt.Errorf("unbind agent failed: %s", resp.ErrorMessage)

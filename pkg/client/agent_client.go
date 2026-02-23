@@ -15,8 +15,8 @@ import (
 )
 
 type AgentClient struct {
-	baseURL    string
-	httpClient *http.Client
+	BaseURL    string
+	HttpClient *http.Client
 }
 
 func NewAgentClient(baseURL string) *AgentClient {
@@ -24,8 +24,8 @@ func NewAgentClient(baseURL string) *AgentClient {
 		baseURL = "http://" + baseURL
 	}
 	return &AgentClient{
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		BaseURL:    baseURL,
+		HttpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -36,12 +36,12 @@ func (c *AgentClient) post(endpoint string, req interface{}, resp interface{}) e
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url, err := url.JoinPath(c.baseURL, endpoint)
+	url, err := url.JoinPath(c.BaseURL, endpoint)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	httpResp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(body))
+	httpResp, err := c.HttpClient.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
@@ -66,7 +66,7 @@ func (c *AgentClient) TempChat(message string) (*api.TempChatResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/chat/temp", "application/json", bytes.NewBuffer(jsonData))
+	resp, err := c.HttpClient.Post(c.BaseURL+"/api/v1/agent/chat/temp", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -97,7 +97,7 @@ func (c *AgentClient) Chat(message string) (*api.ChatResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/chat", "application/json", bytes.NewBuffer(jsonData))
+	resp, err := c.HttpClient.Post(c.BaseURL+"/api/v1/agent/chat", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -128,7 +128,7 @@ func (c *AgentClient) HealthCheckWithMonitor(monitorID uint64) (*api.AgentHealth
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal health request: %w", err)
 	}
-	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/health", "application/json", bytes.NewBuffer(jsonData))
+	resp, err := c.HttpClient.Post(c.BaseURL+"/api/v1/agent/health", "application/json", bytes.NewBuffer(jsonData))
 
 	if err != nil {
 		return nil, fmt.Errorf("health check request failed: %w", err)
@@ -159,7 +159,7 @@ func (c *AgentClient) HealthCheck() (*api.AgentHealthResponse, error) {
 
 // pkg/client/agent_client.go
 func (c *AgentClient) Shutdown() error {
-	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/shutdown", "application/json", nil)
+	resp, err := c.HttpClient.Post(c.BaseURL+"/api/v1/agent/shutdown", "application/json", nil)
 	if err != nil {
 		return fmt.Errorf("shutdown request failed: %w", err)
 	}
@@ -172,10 +172,8 @@ func (c *AgentClient) Shutdown() error {
 
 	return nil
 }
-func (c *AgentClient) BaseURL() string {
-	return c.baseURL
-}
-func (c *AgentClient) Notify(key, content string) error {
+
+func (c *AgentClient) Notify(key, content string) (string, error) {
 	req := &api.NotifyRequest{
 		Key:     key,
 		Content: content,
@@ -183,22 +181,22 @@ func (c *AgentClient) Notify(key, content string) error {
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("failed to marshal notify request: %w", err)
+		return "", fmt.Errorf("failed to marshal notify request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.baseURL+"/api/v1/agent/notify", "application/json", bytes.NewBuffer(body))
+	resp, err := c.HttpClient.Post(c.BaseURL+"/api/v1/agent/notify", "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("failed to send notify request: %w", err)
+		return "", fmt.Errorf("failed to send notify request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("notify request failed with status: %d", resp.StatusCode)
+		return "", fmt.Errorf("notify request failed with status: %d", resp.StatusCode)
 	}
 
 	var notifyResp api.NotifyResponse
 	if err := json.NewDecoder(resp.Body).Decode(&notifyResp); err != nil {
-		return fmt.Errorf("failed to decode notify response: %w", err)
+		return "", fmt.Errorf("failed to decode notify response: %w", err)
 	}
 
 	if !notifyResp.Success {
@@ -206,10 +204,10 @@ func (c *AgentClient) Notify(key, content string) error {
 		if msg == "" {
 			msg = "unknown error"
 		}
-		return fmt.Errorf("notify failed: %s", msg)
+		return "", fmt.Errorf("notify failed: %s", msg)
 	}
 
-	return nil
+	return notifyResp.Result, nil
 }
 
 // BindMemSpace binds the agent to a MemSpace (local only)
@@ -247,4 +245,25 @@ func (c *AgentClient) UnbindMemSpace(memspaceID uint64) error {
 		return fmt.Errorf("unbind memspace failed: %s", msg)
 	}
 	return nil
+}
+
+// Communicate sends a message to another agent via the Agent HTTP API
+func (c *AgentClient) Communicate(targetAgentID uint64, key, content string) (string, error) {
+	req := api.CommunicateRequest{
+		TargetAgentID: fmt.Sprintf("%d", targetAgentID),
+		Key:           key,
+		Content:       content,
+	}
+	var resp api.CommunicateResponse
+
+	err := c.post("/api/v1/agent/communicate", req, &resp)
+	if err != nil {
+		return "", fmt.Errorf("communicate failed: %w", err)
+	}
+
+	if !resp.Success {
+		return "", fmt.Errorf("communicate failed: %s", resp.ErrorMessage)
+	}
+
+	return resp.Result, nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,13 +74,15 @@ func (c *MemSpaceManagerClient) ListMemSpaces() ([]api.MemSpaceInfo, error) {
 	return resp.MemSpaces, nil
 }
 
-// BindMemSpace binds an agent to a memspace
-func (c *MemSpaceManagerClient) BindMemSpace(agentID, memspaceID uint64) error {
-	req := api.BindMemSpaceRequest{
-		AgentID:    agentID,
+// BindMemSpace binds an agent to a MemSpace via Manager
+func (c *MemSpaceManagerClient) BindMemSpace(agentID uint64, memspaceID uint64, addr, role string) error {
+	req := api.BindMemSpaceRequestManager{
+		AgentID:    strconv.FormatUint(agentID, 10),
 		MemSpaceID: fmt.Sprintf("%d", memspaceID),
+		Addr:       addr,
+		Role:       role,
 	}
-	var resp api.BindMemSpaceResponse
+	var resp api.BindMemSpaceResponseManager
 
 	err := c.post("/api/v1/manager/bind_memspace", req, &resp)
 	if err != nil {
@@ -93,13 +96,13 @@ func (c *MemSpaceManagerClient) BindMemSpace(agentID, memspaceID uint64) error {
 	return nil
 }
 
-// UnbindMemSpace unbinds an agent from a memspace
+// UnbindMemSpace unbinds an agent from a MemSpace via Manager
 func (c *MemSpaceManagerClient) UnbindMemSpace(agentID, memspaceID uint64) error {
-	req := api.UnbindMemSpaceRequest{
-		AgentID:    agentID,
+	req := api.UnbindMemSpaceRequestManager{
+		AgentID:    strconv.FormatUint(agentID, 10),
 		MemSpaceID: fmt.Sprintf("%d", memspaceID),
 	}
-	var resp api.UnbindMemSpaceResponse
+	var resp api.UnbindMemSpaceResponseManager
 
 	err := c.post("/api/v1/manager/unbind_memspace", req, &resp)
 	if err != nil {

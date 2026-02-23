@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,8 @@ type Agent struct {
 	memSpaceManagerClient  *client.MemSpaceManagerClient
 	chatClient             *client.ChatServerClient
 	embeddingClient        *client.EmbeddingServerClient
+	httpAddr               string
+	role                   string
 	mu                     sync.RWMutex
 	isJob                  bool
 	privateMemSpaceClients *client.MemSpaceClient
@@ -28,7 +31,9 @@ type Agent struct {
 	boundMonitorID         uint64
 	boundMu                sync.RWMutex
 
-	taskQueue chan *AgentTask
+	taskQueue     chan *AgentTask
+	taskResults   map[string]*TaskResult // taskID -> TaskResult
+	taskResultsMu sync.RWMutex
 }
 
 // NewAgent creates a new Agent and initializes all service clients
@@ -41,6 +46,9 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 		embeddingClient:       client.NewEmbeddingServerClient(config.VectorServerAddr),
 		isJob:                 config.IsJob,
 		publicMemSpaceClients: make([]*client.MemSpaceClient, 0),
+		taskResults:           make(map[string]*TaskResult),
+		httpAddr:              config.HttpAddr,
+		role:                  config.Role,
 	}
 	//agent.bindingMemspace()
 	ctx, _ := context.WithCancel(context.Background())
@@ -289,46 +297,117 @@ func (a *Agent) Start(ctx context.Context) error {
 		}
 	}
 }
-
 func (a *Agent) handleTask(task *AgentTask) error {
+	var result string
+	var err error
+
+	log.Infof("Agent %d start processing task: %s (ID: %s)", a.AgentId, task.Type, task.ID)
+
 	switch task.Type {
 	case TaskTypeComm:
-		msg, err := a.handleCommTask(task)
+		result, err = a.handleCommTask(task)
 		if err != nil {
-			return err
+			// Comm 任务出错后继续触发 Chat
+			log.Warnf("Comm task error, but continuing: %v", err)
 		}
 		// Enqueue as Chat task
 		chatTask := &AgentTask{
 			Type:      TaskTypeChat,
-			Content:   msg,
+			Content:   result,
 			Timestamp: time.Now().Unix(),
+			ID:        task.ID,
 		}
 		select {
 		case a.taskQueue <- chatTask:
 		default:
 			log.Warnf("Task queue full, dropping chat task")
 		}
+		// Comm 任务本身不设置结果，等待 Chat 任务完成
 		return nil
 
 	case TaskTypeTempChat:
-		_, err := a.TempChat(task.Content)
-		return err
+		result, err = a.TempChat(task.Content)
 
 	case TaskTypeChat:
-		_, err := a.Chat(task.Content)
-		return err
+		result, err = a.Chat(task.Content)
 
 	default:
-		return fmt.Errorf("unknown task type: %s", task.Type)
+		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
+	if task.ID != "" {
+		a.SetTaskResult(task.ID, result, err)
+	}
+	if err != nil {
+		log.Errorf("Agent %d failed to handle task %s: %v", a.AgentId, task.ID, err)
+	}
+
+	return err
 }
 
-func (a *Agent) SubmitTask(task *AgentTask) error {
+// SubmitTask submits a task and returns a taskID for tracking
+func (a *Agent) SubmitTask(task *AgentTask) (string, error) {
 	if task.Timestamp == 0 {
 		task.Timestamp = time.Now().Unix()
 	}
-	a.taskQueue <- task
-	return nil
+	// 生成唯一 taskID
+	if task.ID == "" {
+		task.ID = fmt.Sprintf("task_%d_%d", a.AgentId, time.Now().UnixNano())
+	}
+	// 创建结果追踪
+	result := &TaskResult{
+		Done: make(chan struct{}),
+	}
+	a.taskResultsMu.Lock()
+	a.taskResults[task.ID] = result
+	a.taskResultsMu.Unlock()
+	// 提交任务
+	select {
+	case a.taskQueue <- task:
+		log.Debugf("Agent %d submitted task %s", a.AgentId, task.ID)
+		return task.ID, nil
+	default:
+		// 队列满，清理结果追踪
+		a.taskResultsMu.Lock()
+		delete(a.taskResults, task.ID)
+		a.taskResultsMu.Unlock()
+		return "", fmt.Errorf("task queue full")
+	}
+}
+
+// GetTaskResult waits for task completion and returns the result
+func (a *Agent) GetTaskResult(taskID string, timeout time.Duration) (string, error) {
+	a.taskResultsMu.RLock()
+	result, exists := a.taskResults[taskID]
+	a.taskResultsMu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("task %s not found", taskID)
+	}
+
+	// 等待任务完成
+	select {
+	case <-result.Done:
+		// 任务完成，清理追踪
+		a.taskResultsMu.Lock()
+		delete(a.taskResults, taskID)
+		a.taskResultsMu.Unlock()
+		return result.Result, result.Error
+	case <-time.After(timeout):
+		return "", fmt.Errorf("task %s timeout", taskID)
+	}
+}
+
+// SetTaskResult sets the result for a completed task
+func (a *Agent) SetTaskResult(taskID string, result string, err error) {
+	a.taskResultsMu.RLock()
+	taskResult, exists := a.taskResults[taskID]
+	a.taskResultsMu.RUnlock()
+
+	if exists {
+		taskResult.Result = result
+		taskResult.Error = err
+		close(taskResult.Done) // 关闭通道表示完成
+	}
 }
 func (a *Agent) handleChatTask(task *AgentTask) error {
 	content := task.Content
@@ -480,67 +559,93 @@ func (a *Agent) handleCommTask(task *AgentTask) (string, error) {
 			return "", fmt.Errorf("failed to get memory by key: %w", err)
 		}
 	}
-
+	log.Infof("the cotent: %s, req.Content:%s", content, task.Content)
 	if err != nil {
 		return content, err
 	}
 	return content, nil
 }
 
-// bindingMemSpace binds the agent to a MemSpace (local only, no manager call)
+// bindingMemSpace binds the agent to a MemSpace via MemSpaceManager
 func (a *Agent) bindingMemSpace(memSpaceConfig *configs.MemSpaceConfig) error {
 	if memSpaceConfig == nil {
 		return fmt.Errorf("memspace config is nil")
 	}
-
-	// Create client
-	baseURL := memSpaceConfig.HttpAddr
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
-		baseURL = "http://" + baseURL
+	// 验证 Manager 客户端是否存在
+	if a.memSpaceManagerClient == nil {
+		return fmt.Errorf("memspace manager client not initialized")
 	}
-	client := client.NewMemSpaceClient(baseURL)
-
+	// 获取 Agent 自身的 HTTP 地址（从 config 或默认）
+	agentAddr := a.httpAddr
+	agentRole := a.role
+	// Step 1: 调用 MemSpaceManager 进行绑定
+	log.Infof("[Agent %d] Binding to MemSpace %d via Manager...", a.AgentId, memSpaceConfig.MemSpaceID)
+	err := a.memSpaceManagerClient.BindMemSpace(
+		a.AgentId,
+		memSpaceConfig.MemSpaceID,
+		agentAddr,
+		agentRole,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bind memspace via manager: %w", err)
+	}
+	log.Infof("[Agent %d] Successfully bound to MemSpace %d via Manager", a.AgentId, memSpaceConfig.MemSpaceID)
+	// Step 2: 本地创建 MemSpaceClient（用于后续直接通信）
+	baseURL := memSpaceConfig.HttpAddr
+	msClient := client.NewMemSpaceClient(baseURL)
+	// Step 3: 存储到本地 map
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.memSpaceClients[memSpaceConfig.MemSpaceID] = msClient
 
-	// Store in main map
-	a.memSpaceClients[memSpaceConfig.MemSpaceID] = client
-
-	// Update private/public references
+	// 更新 private/public references
 	if memSpaceConfig.Type == "private" {
-		a.privateMemSpaceClients = client
+		a.privateMemSpaceClients = msClient
 	} else if memSpaceConfig.Type == "public" {
 		// Avoid duplicates
 		exists := false
 		for _, c := range a.publicMemSpaceClients {
-			if c != nil && c.BaseURL == client.BaseURL {
+			if c != nil && c.BaseURL == msClient.BaseURL {
 				exists = true
 				break
 			}
 		}
 		if !exists {
-			a.publicMemSpaceClients = append(a.publicMemSpaceClients, client)
+			a.publicMemSpaceClients = append(a.publicMemSpaceClients, msClient)
 		}
 	}
-
-	log.Infof("Agent %d bound to MemSpace %d (%s)", a.AgentId, memSpaceConfig.MemSpaceID, memSpaceConfig.Type)
+	log.Infof("Agent %d bound to MemSpace %d (%s) locally", a.AgentId, memSpaceConfig.MemSpaceID, memSpaceConfig.Type)
 	return nil
 }
-
-// unBindingMemSpace unbinds the agent from a MemSpace (local only)
 func (a *Agent) unBindingMemSpace(memID uint64) error {
+	// 验证 Manager 客户端是否存在
+	if a.memSpaceManagerClient == nil {
+		return fmt.Errorf("memspace manager client not initialized")
+	}
+	// Step 1: 调用 MemSpaceManager 进行解绑
+	log.Infof("[Agent %d] Unbinding from MemSpace %d via Manager...", a.AgentId, memID)
+	err := a.memSpaceManagerClient.UnbindMemSpace(a.AgentId, memID)
+	if err != nil {
+		log.Warnf("Failed to unbind memspace via manager: %v", err)
+		// 不返回错误，继续清理本地状态
+	}
+	log.Infof("[Agent %d] Successfully unbound from MemSpace %d via Manager", a.AgentId, memID)
+
+	// Step 2: 清理本地状态
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	memspaceClient, exists := a.memSpaceClients[memID]
 	if !exists {
-		return fmt.Errorf("memspace %d not bound", memID)
+		return fmt.Errorf("memspace %d not bound locally", memID)
 	}
 	// Remove from main map
 	delete(a.memSpaceClients, memID)
+
 	// Remove from private reference
 	if a.privateMemSpaceClients != nil && a.privateMemSpaceClients == memspaceClient {
 		a.privateMemSpaceClients = nil
 	}
+
 	// Remove from public slice
 	newPublic := make([]*client.MemSpaceClient, 0, len(a.publicMemSpaceClients))
 	for _, c := range a.publicMemSpaceClients {
@@ -549,7 +654,61 @@ func (a *Agent) unBindingMemSpace(memID uint64) error {
 		}
 	}
 	a.publicMemSpaceClients = newPublic
-
-	log.Infof("Agent %d unbound from MemSpace %d", a.AgentId, memID)
+	log.Infof("Agent %d unbound from MemSpace %d locally", a.AgentId, memID)
 	return nil
+}
+
+// pkg/runtime/agent/agent.go
+
+// Communicate sends a message to another agent via public MemSpace
+func (a *Agent) Communicate(targetAgentID uint64, key string, content string) (string, error) {
+	log.Infof("[agent %d] communicating with key: %s,content:%s", a.AgentId, key, content)
+	if content == "" {
+		return "", fmt.Errorf("content cannot be empty")
+	}
+	// Step 1: 查找目标 Agent 在哪个 Public MemSpace 的通讯录中
+	var targetMemSpaceClient *client.MemSpaceClient
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		// 查询通讯录
+		agents, err := msClient.ListAgents()
+		log.Debugf("get list")
+		if err != nil {
+			log.Warnf("Failed to list agents from memspace: %v", err)
+			continue
+		}
+		// 查找目标 Agent
+		for _, agent := range agents {
+			agentID, err := strconv.ParseUint(agent.AgentID, 10, 64)
+			if err != nil {
+				continue
+			}
+			if agentID == targetAgentID {
+				targetMemSpaceClient = msClient
+				//targetAddr = agent.Addr
+				break
+			}
+		}
+		if targetMemSpaceClient != nil {
+			log.Infof("find memspaceClient")
+			break
+		}
+	}
+
+	if targetMemSpaceClient == nil {
+		return "", fmt.Errorf("target agent %d not found in any public memspace registry", targetAgentID)
+	}
+	// Step 2: update the persist region
+	// Step 3: 通过通讯区发送消息（记录通讯元数据）
+	result, err := targetMemSpaceClient.SendMessage(a.AgentId, targetAgentID, key, content)
+	if err != nil {
+		log.Warnf("Failed to send comm message: %v", err)
+		// 不返回错误，消息已写入
+	}
+	log.Infof("Agent %d communicated with Agent %d via memspace (key: %s)", a.AgentId, targetAgentID, key)
+	return result, nil
 }

@@ -1,5 +1,5 @@
 http_addr: "localhost:7007"
 monitor_urls:
-  1: "localhost:8081"
+  1: "localhost:9091"
 #  2: "localhost:8082"
 #  3: "localhost:8083"

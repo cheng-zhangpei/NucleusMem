@@ -52,10 +52,10 @@ func NewMemSpaceManager(config *configs.MemSpaceManagerConfig) (*MemSpaceManager
 
 		// Health Check
 		if err := client.HealthCheck(); err != nil {
-			log.Warnf("Monitor %d health check failed: %v (will retry)", nodeID, err)
+			log.Warnf("[memspace_manager]Monitor %d health check failed: %v (will retry)", nodeID, err)
 			manager.failedMonitors[nodeID] = addr
 		} else {
-			log.Infof("Monitor %d connected successfully", nodeID)
+			log.Infof("[memspace_manager]Monitor %d connected successfully", nodeID)
 			manager.memSpaceMonitorClient[nodeID] = client
 		}
 	}
@@ -110,21 +110,20 @@ func (mm *MemSpaceManager) ListMemSpaceInfo() []*MemSpaceInfo {
 }
 
 // BindMemSpaceToAgent binds an agent to a memspace (direct call to memspace)
-func (mm *MemSpaceManager) BindMemSpaceToAgent(agentID, memspaceID uint64) error {
+func (mm *MemSpaceManager) BindMemSpaceToAgent(agentID, memspaceID uint64, role string, addr string) error {
 	log.Debugf("[manager] receive bind memspace to agent %d", agentID)
+
 	info, ok := mm.memSpaceCache.GetMemSpace(memspaceID)
 	if !ok {
 		return fmt.Errorf("memspace %d not found in cache", memspaceID)
 	}
-
 	// Use HttpAddr directly (it's already the full address)
 	memspaceAddr := info.HttpAddr
 	if !strings.HasPrefix(memspaceAddr, "http://") && !strings.HasPrefix(memspaceAddr, "https://") {
 		memspaceAddr = "http://" + memspaceAddr
 	}
-
 	memSpaceClient := client.NewMemSpaceClient(memspaceAddr)
-	return memSpaceClient.BindAgent(agentID)
+	return memSpaceClient.BindAgent(agentID, addr, role)
 }
 
 // UnBindMemSpaceWithAgent unbinds an agent from a memspace (direct call)
@@ -215,7 +214,7 @@ func (mm *MemSpaceManager) DisplayMemSpaces() {
 	memspaces := mm.ListMemSpaceInfo()
 
 	if len(memspaces) == 0 {
-		log.Info("No memspaces in manager cache.")
+		log.Infof("No memspaces in manager cache.")
 		return
 	}
 
@@ -241,7 +240,7 @@ func (mm *MemSpaceManager) startRetryWorker() {
 	go func() {
 		defer mm.wg.Done()
 
-		ticker := time.NewTicker(30 * time.Second) // 每 30 秒重试一次
+		ticker := time.NewTicker(10 * time.Second) // 每 30 秒重试一次
 		defer ticker.Stop()
 
 		for {
@@ -271,7 +270,7 @@ func (mm *MemSpaceManager) retryFailedMonitors() {
 		return
 	}
 
-	log.Infof("Retrying %d failed monitors...", len(failedCopy))
+	log.Infof("[memspace_manager]Retrying %d failed monitors...", len(failedCopy))
 
 	for nodeID, addr := range failedCopy {
 		select {
@@ -292,7 +291,7 @@ func (mm *MemSpaceManager) retryFailedMonitors() {
 		if _, exists := mm.failedMonitors[nodeID]; exists {
 			delete(mm.failedMonitors, nodeID)
 			mm.memSpaceMonitorClient[nodeID] = client
-			log.Infof("Monitor %d reconnected successfully", nodeID)
+			log.Infof("[memspace_manager]Monitor %d reconnected successfully", nodeID)
 			// Load MemSpace info from newly connected monitor
 			go mm.loadMemSpaceFromMonitor(nodeID, client)
 		}
@@ -324,5 +323,5 @@ func (mm *MemSpaceManager) loadMemSpaceFromMonitor(nodeID uint64, client *client
 		}
 		mm.memSpaceCache.UpdateMemSpace(cacheInfo)
 	}
-	log.Infof("Loaded %d memspaces from monitor %d", len(memspaces), nodeID)
+	log.Infof("[memspace_manager]Loaded %d memspaces from monitor %d", len(memspaces), nodeID)
 }

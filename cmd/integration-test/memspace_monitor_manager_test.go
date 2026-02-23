@@ -78,7 +78,7 @@ func TestManager_BindingMemSpace(t *testing.T) {
 	cfgMemSpace, err := configs.LoadMemSpaceConfigFromYAML(memspaceConfigFile)
 	assert.NoError(t, err)
 	managerClient := client.NewMemSpaceManagerClient(cfgManager.ListenAddr)
-	err = managerClient.BindMemSpace(101, cfgMemSpace.MemSpaceID)
+	err = managerClient.BindMemSpace(101, cfgMemSpace.MemSpaceID, cfgMemSpace.HttpAddr, "")
 	assert.NoError(t, err)
 }
 func TestManager_unBindingMemSpace(t *testing.T) {

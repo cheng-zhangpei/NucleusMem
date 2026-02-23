@@ -39,13 +39,14 @@ type ShutdownResponse struct {
 	Success bool `json:"success"`
 }
 type NotifyRequest struct {
-	Key      string            `json:"key,omitempty"`     // e.g., "memory/101/5"
-	Content  string            `json:"content,omitempty"` // direct content
-	Metadata map[string]string `json:"metadata,omitempty"`
+	Key     string `json:"key"`
+	Content string `json:"content"`
 }
 
+// NotifyResponse is the response for notify operation
 type NotifyResponse struct {
 	Success      bool   `json:"success"`
+	Result       string `json:"result,omitempty"` // ✅ 任务处理结果
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
@@ -61,4 +62,16 @@ type BindMemSpaceRequest struct {
 type UnbindMemSpaceRequest struct {
 	AgentID    uint64 `json:"agent_id"`
 	MemSpaceID string `json:"memspace_id"`
+}
+type CommunicateRequest struct {
+	TargetAgentID string `json:"target_agent_id"` // 目标 Agent ID
+	Key           string `json:"key"`             // key
+	Content       string `json:"content"`         // 通讯内容
+}
+
+// CommunicateResponse is the response for communicate operation
+type CommunicateResponse struct {
+	Result       string `json:"result"`
+	Success      bool   `json:"success"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }

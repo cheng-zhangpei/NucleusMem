@@ -1,6 +1,6 @@
 agent_id: 103
 agent_manager_addr: "http://localhost:8080"
-memspace_manager_addr: "http://localhost:7000"
+memspace_manager_addr: "http://localhost:9200"
 chat_server_addr: "http://localhost:20001"
 vector_server_addr: "http://localhost:5000"
 role: "ResidentAgent"

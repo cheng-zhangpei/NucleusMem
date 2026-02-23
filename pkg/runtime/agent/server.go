@@ -34,13 +34,14 @@ func (s *AgentHTTPServer) handleTempChat(w http.ResponseWriter, r *http.Request)
 		Type:    TaskTypeTempChat,
 		Content: req.Message,
 	}
-	if err := s.agent.SubmitTask(task); err != nil {
+	response, err := s.agent.SubmitTask(task)
+	if err != nil {
 		http.Error(w, "Failed to submit task", http.StatusInternalServerError)
 		return
 	}
 
 	// Immediate ack (async processing)
-	resp := api.TempChatResponse{Success: true}
+	resp := api.TempChatResponse{Response: response, Success: true}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -57,35 +58,63 @@ func (s *AgentHTTPServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		Type:    TaskTypeChat,
 		Content: req.Message,
 	}
-	if err := s.agent.SubmitTask(task); err != nil {
+	response, err := s.agent.SubmitTask(task)
+	if err != nil {
 		http.Error(w, "Failed to submit task", http.StatusInternalServerError)
 		return
 	}
 
-	resp := api.ChatResponse{Success: true}
+	resp := api.ChatResponse{Response: response, Success: true}
 	json.NewEncoder(w).Encode(resp)
 }
 
 // POST /api/v1/agent/notify
+// POST /api/v1/agent/notify
 func (s *AgentHTTPServer) handleNotify(w http.ResponseWriter, r *http.Request) {
-	var req api.NotifyRequest // ← 你需要定义这个结构
+	var req api.NotifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-
-	// Submit as Comm task
-	task := &AgentTask{
-		Type:    TaskTypeComm,
-		Key:     req.Key,
-		Content: req.Content,
-	}
-	if err := s.agent.SubmitTask(task); err != nil {
-		http.Error(w, "Failed to submit notify task", http.StatusInternalServerError)
+	if req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
-	resp := api.NotifyResponse{Success: true}
+
+	// 创建 Comm 任务
+	task := &AgentTask{
+		Type:      TaskTypeComm,
+		Key:       req.Key,
+		Content:   req.Content,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// 提交任务并获取 taskID
+	taskID, err := s.agent.SubmitTask(task)
+	if err != nil {
+		resp := api.NotifyResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// 等待任务完成（带超时）
+	result, err := s.agent.GetTaskResult(taskID, 30*time.Second)
+
+	resp := api.NotifyResponse{
+		Success: err == nil,
+		Result:  result,
+	}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 	json.NewEncoder(w).Encode(resp)
+
+	log.Infof("Agent %d notify completed for task %s: %v", s.agent.AgentId, taskID, err)
 }
 
 // GET /api/v1/health
@@ -156,7 +185,6 @@ func (s *AgentHTTPServer) handleBindMemSpace(w http.ResponseWriter, r *http.Requ
 		Type:       strings.ToLower(req.Type),
 		HttpAddr:   req.HttpAddr,
 	}
-
 	err = s.agent.bindingMemSpace(config)
 	resp := map[string]interface{}{
 		"success": err == nil,
@@ -192,6 +220,34 @@ func (s *AgentHTTPServer) handleUnbindMemSpace(w http.ResponseWriter, r *http.Re
 	}
 	json.NewEncoder(w).Encode(resp)
 }
+func (s *AgentHTTPServer) handleCommunicate(w http.ResponseWriter, r *http.Request) {
+	var req api.CommunicateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.TargetAgentID == "" {
+		http.Error(w, "target_agent_id is required", http.StatusBadRequest)
+		return
+	}
+	if req.Content == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+	targetAgentID, err := strconv.ParseUint(req.TargetAgentID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid target_agent_id", http.StatusBadRequest)
+		return
+	}
+	result, err := s.agent.Communicate(targetAgentID, req.Key, req.Content)
+	log.Debugf("[agent] Agent %d communicate result: %v", s.agent.AgentId, err)
+	resp := api.CommunicateResponse{Result: result, Success: err == nil}
+	if err != nil {
+		resp.ErrorMessage = err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
 
 // Start initializes and starts the HTTP server
 // addr should be in the format "host:port" (e.g., ":8080")
@@ -204,7 +260,7 @@ func (s *AgentHTTPServer) Start(addr string) error {
 	mux.HandleFunc("/api/v1/agent/notify", s.handleNotify)
 	mux.HandleFunc("/api/v1/agent/bind_memspace", s.handleBindMemSpace)
 	mux.HandleFunc("/api/v1/agent/unbind_memspace", s.handleUnbindMemSpace)
-
+	mux.HandleFunc("/api/v1/agent/communicate", s.handleCommunicate)
 	log.Infof("Agent HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

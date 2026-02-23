@@ -132,8 +132,8 @@ func (s *MemSpaceHTTPServer) handleSendMessage(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	err = s.memSpace.SendMessage(fromAgent, toAgent, req.Key, req.RefType)
-	resp := api.SendMessageResponse{Success: err == nil}
+	responseContent, err := s.memSpace.SendMessage(fromAgent, toAgent, req.Key, req.Content)
+	resp := api.SendMessageResponse{Response: responseContent, Success: err == nil}
 	if err != nil {
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
@@ -219,7 +219,18 @@ func (s *MemSpaceHTTPServer) handleBindAgent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err = s.memSpace.BindAgent(agentID)
+	// 验证必填字段
+	if req.Addr == "" {
+		http.Error(w, "addr is required", http.StatusBadRequest)
+		return
+	}
+	if req.Role == "" {
+		http.Error(w, "role is required", http.StatusBadRequest)
+		return
+	}
+
+	// 调用 MemSpace.BindAgent
+	err = s.memSpace.BindAgent(agentID, req.Addr, req.Role)
 	resp := api.BindAgentResponse{Success: err == nil}
 	if err != nil {
 		resp.ErrorMessage = err.Error()

@@ -261,7 +261,7 @@ func (am *AgentMonitor) GetNodeSystemInfo() *NodeSystemInfo {
 		agents = append(agents, api.AgentRuntimeStatus{
 			AgentID: strconv.FormatUint(agentID, 10),
 			Phase:   "Connected",
-			Addr:    client.BaseURL(), // 需要添加这个方法
+			Addr:    client.BaseURL,
 		})
 	}
 	// 2. 本地启动的 Agents (am.agents) - 如果有实现的话

@@ -1,6 +1,9 @@
 package memspace_manager
 
-import "sync"
+import (
+	"github.com/pingcap-incubator/tinykv/log"
+	"sync"
+)
 
 // MemSpaceInfo represents cached information about a MemSpace
 type MemSpaceInfo struct {
@@ -32,7 +35,25 @@ func NewMemSpaceCache() *MemSpaceCache {
 func (c *MemSpaceCache) UpdateMemSpace(info *MemSpaceInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	isNew := false
+	if _, exists := c.memspaces[info.MemSpaceID]; !exists {
+		isNew = true
+	}
 	c.memspaces[info.MemSpaceID] = info
+	if isNew {
+		log.Infof(
+			"[MemSpaceCache] ➕ ADDED    | ID: %-6d | Name: %-20s | Type: %-8s | Owner: %-6d | Node: %-4d | Status: %-8s | Addr: %s",
+			info.MemSpaceID,
+			info.Name,
+			info.Type,
+			info.OwnerAgentID,
+			info.NodeID,
+			info.Status,
+			info.HttpAddr,
+		)
+	} else {
+		return
+	}
 }
 
 // GetMemSpace retrieves a MemSpace from the cache

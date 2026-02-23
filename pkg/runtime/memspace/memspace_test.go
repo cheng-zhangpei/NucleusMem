@@ -131,23 +131,33 @@ func TestMemSpaceClient_Communication(t *testing.T) {
 	agent1, _ := configs.LoadAgentConfigFromYAML(agentConfigFile1)
 	agent2, _ := configs.LoadAgentConfigFromYAML(agentConfigFile2)
 	t.Log("→ Registering Agent 101")
-	if err := memspaceClient.RegisterAgent(agent1.AgentId, "localhost:9001", "worker"); err != nil {
+	if err := memspaceClient.RegisterAgent(agent1.AgentId, "localhost:8081", "worker"); err != nil {
 		t.Fatalf("RegisterAgent 101 failed: %v", err)
 	}
 
 	t.Log("→ Registering Agent 102")
-	if err := memspaceClient.RegisterAgent(agent2.AgentId, "localhost:9002", "worker"); err != nil {
+	if err := memspaceClient.RegisterAgent(agent2.AgentId, "localhost:8081", "worker"); err != nil {
 		t.Fatalf("RegisterAgent 102 failed: %v", err)
 	}
 	agentClient1 := client.NewAgentClient("localhost:9001")
 	agentClient2 := client.NewAgentClient("localhost:9002")
-	err := agentClient1.BindMemSpace(&api.BindMemSpaceRequest{"1001", "Public", baseURL})
+	err := agentClient1.BindMemSpace(&api.BindMemSpaceRequest{
+		MemSpaceID: "1001",
+		Type:       "public", // 小写，与配置一致
+		HttpAddr:   baseURL,
+	})
 	if err != nil {
-		t.Fatalf("BindMemSpace failed: %v", err)
+		t.Fatalf("Agent1 BindMemSpace failed: %v", err)
 	}
-	err = agentClient2.BindMemSpace(&api.BindMemSpaceRequest{"1001", "Public", baseURL})
+
+	// Agent 2 绑定 MemSpace
+	err = agentClient2.BindMemSpace(&api.BindMemSpaceRequest{
+		MemSpaceID: "1001",
+		Type:       "public",
+		HttpAddr:   baseURL,
+	})
 	if err != nil {
-		t.Fatalf("BindMemSpace failed: %v", err)
+		t.Fatalf("Agent2 BindMemSpace failed: %v", err)
 	}
 	// agent and memspace have connected with each other
 	t.Log("→ Listing agents")
@@ -174,7 +184,7 @@ func TestMemSpaceClient_Communication(t *testing.T) {
 	messageKey := "memory/101/5" // 假设这是某条记忆的 key
 	refType := "memory"
 
-	if err := memspaceClient.SendMessage(agent1.AgentId, agent2.AgentId, messageKey, refType); err != nil {
+	if _, err := memspaceClient.SendMessage(agent1.AgentId, agent2.AgentId, messageKey, refType); err != nil {
 		t.Fatalf("SendMessage failed: %v", err)
 	}
 	t.Log("✅ Communication test passed! Message sent successfully.")

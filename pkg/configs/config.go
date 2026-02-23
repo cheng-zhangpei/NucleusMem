@@ -14,6 +14,7 @@ type AgentConfig struct {
 	Path                string          `yaml:"path"`
 	IsJob               bool            `yaml:"is_job"`
 	HttpAddr            string          `yaml:"http_addr"`
+	role                string          `yaml:"role"`
 }
 
 type MemSpaceInfo struct {

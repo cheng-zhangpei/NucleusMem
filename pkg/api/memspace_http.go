@@ -59,9 +59,10 @@ type SendMessageRequest struct {
 	FromAgent string `json:"from_agent"`
 	ToAgent   string `json:"to_agent"`
 	Key       string `json:"key"`
-	RefType   string `json:"ref_type"`
+	Content   string `json:"content"`
 }
 type SendMessageResponse struct {
+	Response     string `json:"response"`
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
@@ -78,19 +79,25 @@ type ListAgentsResponse struct {
 	Agents  []AgentRegistryEntry `json:"agents"`
 }
 
-// BindAgent
+// BindAgentRequest is used to bind an agent to a MemSpace
 type BindAgentRequest struct {
 	AgentID string `json:"agent_id"`
+	Addr    string `json:"addr"` // Agent HTTP address, e.g., "localhost:9001"
+	Role    string `json:"role"` // Agent role, e.g., "worker", "coordinator"
 }
+
+// BindAgentResponse is the response for bind agent operation
 type BindAgentResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
 
-// UnbindAgent
+// UnbindAgentRequest is used to unbind an agent from a MemSpace
 type UnbindAgentRequest struct {
 	AgentID string `json:"agent_id"`
 }
+
+// UnbindAgentResponse is the response for unbind agent operation
 type UnbindAgentResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
