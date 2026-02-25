@@ -45,6 +45,8 @@ type MemSpace struct {
 	MemoryRegion      *memspace_region.MemoryRegion
 	CommRegion        *memspace_region.CommRegion
 	SummaryRegion     *memspace_region.SummaryRegion
+	ToolRegion        *memspace_region.ToolRegion
+	TaskRegion        *memspace_region.TaskRegion
 	mu                sync.RWMutex
 	kvClient          *tinykv_client.MemClient
 	status            configs.MemSpaceStatus
@@ -104,6 +106,8 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 		MemoryRegion:     memspace_region.NewMemoryRegion(kvClient, config.MemSpaceID, serverClient),
 		CommRegion:       memspace_region.NewCommRegion(kvClient, config.MemSpaceID),
 		SummaryRegion:    memspace_region.NewSummaryRegion(kvClient, chatServerClient, config.MemSpaceID),
+		ToolRegion:       memspace_region.NewToolRegion(kvClient, config.MemSpaceID),
+		TaskRegion:       memspace_region.NewTaskRegion(kvClient, config.MemSpaceID),
 		status:           configs.MemSpaceStatusInactive,
 		boundAgents:      make(map[uint64]*AgentBinding),
 		httpAddr:         config.HttpAddr,
@@ -359,4 +363,53 @@ func (m *MemSpace) IsBound(agentID uint64) bool {
 func (m *MemSpace) Stop() {
 	m.workerCancel()
 	m.workerWG.Wait()
+}
+
+// InitTaskDAG sets up the dependency graph for this MemSpace's ViewSpace
+func (m *MemSpace) InitTaskDAG(dag *memspace_region.TaskDAG) error {
+	return m.TaskRegion.SaveDAG(dag)
+}
+
+// GetReadyTasks returns task nodes that are ready to execute
+func (m *MemSpace) GetReadyTasks() ([]string, error) {
+	return m.TaskRegion.GetReadyNodes()
+}
+
+// CompleteTask marks a task node as completed and stores its result
+func (m *MemSpace) CompleteTask(nodeName string, result map[string]interface{}) error {
+	return m.TaskRegion.UpdateNodeResult(nodeName, result, "")
+}
+
+// FailTask marks a task node as failed
+func (m *MemSpace) FailTask(nodeName string, errMsg string) error {
+	return m.TaskRegion.UpdateNodeResult(nodeName, nil, errMsg)
+}
+
+// WriteAudit writes an audit entry (primarily for Global ViewSpace)
+func (m *MemSpace) WriteAudit(agentID uint64, action, nodeName, detail string) error {
+	return m.TaskRegion.WriteAuditEntry(agentID, action, nodeName, detail)
+}
+
+// ============================================================
+// Tool Region convenience methods
+// ============================================================
+
+// RegisterTool registers a tool in this MemSpace
+func (m *MemSpace) RegisterTool(tool *configs.ToolDefinition) error {
+	return m.ToolRegion.RegisterTool(tool)
+}
+
+// GetAvailableTools returns all tools in this MemSpace
+func (m *MemSpace) GetAvailableTools() ([]*configs.ToolDefinition, error) {
+	return m.ToolRegion.ListTools()
+}
+
+// FindToolsByTags finds tools matching the given tags
+func (m *MemSpace) FindToolsByTags(tags []string) ([]*configs.ToolDefinition, error) {
+	return m.ToolRegion.FindToolsByTags(tags)
+}
+
+// GetToolByName user provide the key of the tool and the
+func (m *MemSpace) GetToolByName(name string) (*configs.ToolDefinition, error) {
+	return m.ToolRegion.GetTool(name)
 }

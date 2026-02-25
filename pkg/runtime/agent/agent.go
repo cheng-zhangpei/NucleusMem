@@ -4,6 +4,7 @@ import (
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/configs/prompt"
+	tool_executors "NucleusMem/pkg/runtime/agent/executors"
 	"context"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
@@ -31,13 +32,18 @@ type Agent struct {
 	boundMonitorID         uint64
 	boundMu                sync.RWMutex
 
-	taskQueue     chan *AgentTask
-	taskResults   map[string]*TaskResult // taskID -> TaskResult
-	taskResultsMu sync.RWMutex
+	taskQueue      chan *AgentTask
+	taskResults    map[string]*TaskResult // taskID -> TaskResult
+	taskResultsMu  sync.RWMutex
+	toolDispatcher *tool_executors.Dispatcher
 }
 
 // NewAgent creates a new Agent and initializes all service clients
 func NewAgent(config *configs.AgentConfig) (*Agent, error) {
+	// tool executor dispatcher
+	dispatcher := tool_executors.NewDispatcher()
+	dispatcher.Register("http", tool_executors.NewHTTPExecutor())
+
 	agent := &Agent{
 		AgentId:               config.AgentId,
 		memSpaceClients:       make(map[uint64]*client.MemSpaceClient),
@@ -49,6 +55,7 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 		taskResults:           make(map[string]*TaskResult),
 		httpAddr:              config.HttpAddr,
 		role:                  config.Role,
+		toolDispatcher:        dispatcher,
 	}
 	//agent.bindingMemspace()
 	ctx, _ := context.WithCancel(context.Background())
@@ -220,10 +227,20 @@ func (a *Agent) Chat(input string) (string, error) {
 	tempHistory := make([]client.ChatMessage, len(a.tempMemory))
 	copy(tempHistory, a.tempMemory)
 	a.mu.RUnlock()
+	var availableTools []*configs.ToolDefinition
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		tools, err := msClient.ListTools()
+		if err == nil && len(tools) > 0 {
+			availableTools = append(availableTools, tools...)
+		}
+	}
 
 	// Step 3: Build prompt
 	sysMsg := "You are an intelligent agent with access to shared memory and conversation history. Use both to answer the user's query."
-	promptObj := prompt.NewChatPrompt(sysMsg, combinedSummary, input, tempHistory)
+	promptObj := prompt.NewChatPrompt(sysMsg, combinedSummary, input, tempHistory, availableTools)
 	promptStr, err := promptObj.Encode()
 	if err != nil {
 		return "", fmt.Errorf("failed to encode prompt: %w", err)
@@ -329,7 +346,33 @@ func (a *Agent) handleTask(task *AgentTask) error {
 		result, err = a.TempChat(task.Content)
 
 	case TaskTypeChat:
-		result, err = a.Chat(task.Content)
+		result, err = a.handleChatTask(task)
+		if err == nil && result != "" {
+			toolCall, parseErr := prompt.ParseToolCallFromResponse(result)
+			if parseErr == nil && toolCall.Action == "tool_call" {
+				// 创建 Tool 任务
+				toolTask := &AgentTask{
+					ID:        task.ID,
+					Type:      TaskTypeTool,
+					ToolName:  toolCall.ToolName,
+					Params:    toolCall.Parameters,
+					Content:   toolCall.Thought,
+					ParentID:  task.ID,
+					Timestamp: time.Now().Unix(),
+				}
+				select {
+				case a.taskQueue <- toolTask:
+					log.Infof("Agent %d queued tool task: %s", a.AgentId, toolCall.ToolName)
+				default:
+					log.Warnf("Task queue full, dropping tool task")
+				}
+				// Chat 任务不设置结果，等待 Tool 任务完成
+				return nil
+			}
+		}
+
+	case TaskTypeTool:
+		result, err = a.handleToolTask(task)
 
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
@@ -409,10 +452,10 @@ func (a *Agent) SetTaskResult(taskID string, result string, err error) {
 		close(taskResult.Done) // 关闭通道表示完成
 	}
 }
-func (a *Agent) handleChatTask(task *AgentTask) error {
+func (a *Agent) handleChatTask(task *AgentTask) (string, error) {
 	content := task.Content
 	if content == "" {
-		return fmt.Errorf("chat task requires content")
+		return "", fmt.Errorf("chat task requires content")
 	}
 
 	var allSummaries []string
@@ -446,18 +489,27 @@ func (a *Agent) handleChatTask(task *AgentTask) error {
 	tempHistory := make([]client.ChatMessage, len(a.tempMemory))
 	copy(tempHistory, a.tempMemory)
 	a.mu.RUnlock()
-
+	var availableTools []*configs.ToolDefinition
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		tools, err := msClient.ListTools()
+		if err == nil && len(tools) > 0 {
+			availableTools = append(availableTools, tools...)
+		}
+	}
 	sysMsg := "You are an intelligent agent with access to shared memory and conversation history. Use both to answer the user's query."
 	promptObj := prompt.NewChatPrompt(
 		sysMsg,
 		combinedSummary,
 		content,
 		tempHistory,
+		availableTools,
 	)
-
 	promptStr, err := promptObj.Encode()
 	if err != nil {
-		return fmt.Errorf("failed to encode prompt: %w", err)
+		return "", fmt.Errorf("failed to encode prompt: %w", err)
 	}
 
 	req := client.ChatCompletionRequest{
@@ -468,11 +520,11 @@ func (a *Agent) handleChatTask(task *AgentTask) error {
 
 	resp, err := a.chatClient.ChatCompletion(req)
 	if err != nil {
-		return fmt.Errorf("LLM call failed: %w", err)
+		return "", fmt.Errorf("LLM call failed: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {
-		return fmt.Errorf("no response from LLM")
+		return "", fmt.Errorf("no response from LLM")
 	}
 	response := resp.Choices[0].Message.Content
 
@@ -485,11 +537,9 @@ func (a *Agent) handleChatTask(task *AgentTask) error {
 		Role:    "assistant",
 		Content: response,
 	})
-	// 可加长度限制：if len(a.tempMemory) > a.maxHistory { ... }
 	a.mu.Unlock()
-
 	log.Infof("Agent %d processed chat task → %s", a.AgentId, response)
-	return nil
+	return response, nil
 }
 func (a *Agent) handleTempChatTask(task *AgentTask) error {
 	content := task.Content
@@ -711,4 +761,106 @@ func (a *Agent) Communicate(targetAgentID uint64, key string, content string) (s
 	}
 	log.Infof("Agent %d communicated with Agent %d via memspace (key: %s)", a.AgentId, targetAgentID, key)
 	return result, nil
+}
+
+// pkg/runtime/agent/agent.go
+
+// handleToolTask processes a tool invocation task
+func (a *Agent) handleToolTask(task *AgentTask) (string, error) {
+	if task.ToolName == "" {
+		return "", fmt.Errorf("tool_name is required")
+	}
+
+	log.Infof("Agent %d executing tool: %s, params: %v", a.AgentId, task.ToolName, task.Params)
+
+	// 查找工具定义
+	var toolDef *configs.ToolDefinition
+	a.mu.RLock()
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	a.mu.RUnlock()
+
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		tool, err := msClient.GetTool(task.ToolName)
+		if err == nil {
+			toolDef = tool
+			break
+		}
+	}
+
+	if toolDef == nil {
+		return "", fmt.Errorf("tool '%s' not found", task.ToolName)
+	}
+
+	// 调用工具
+	output, err := a.invokeTool(toolDef, task.Params)
+	if err != nil {
+		return "", fmt.Errorf("tool execution failed: %w", err)
+	}
+
+	// ✅ 返回格式化的结果（包含工具输出）
+	response := fmt.Sprintf("Tool '%s' executed successfully. Results: %v",
+		task.ToolName, output)
+
+	log.Infof("Agent %d tool %s completed: %v", a.AgentId, task.ToolName, output)
+	return response, nil
+}
+
+// recordToolExec records tool execution start in MemSpace
+func (a *Agent) recordToolExec(toolName string, params map[string]interface{}) (uint64, error) {
+	// 找到第一个有 ToolRegion 的 MemSpace
+	for _, msClient := range a.publicMemSpaceClients {
+		if msClient != nil {
+			// 需要通过 HTTP API 调用，这里简化处理
+			// 后续可以通过 MemSpaceClient 添加 RecordToolExec 方法
+			return 0, nil
+		}
+	}
+	return 0, nil
+}
+
+// completeToolExec records tool execution completion
+func (a *Agent) completeToolExec(seq uint64, output map[string]interface{}, err error) {
+
+}
+
+// invokeTool calls the actual tool endpoint via the appropriate executor
+func (a *Agent) invokeTool(tool *configs.ToolDefinition, params map[string]interface{}) (map[string]interface{}, error) {
+	if tool.Endpoint == "" && tool.ExecType == "" {
+		// No endpoint and no exec type → mock mode
+		log.Infof("Agent %d mock executing tool: %s", a.AgentId, tool.Name)
+		return map[string]interface{}{"status": "mock_success"}, nil
+	}
+	execType := tool.ExecType
+	if execType == "" {
+		execType = "http" // default to HTTP
+	}
+
+	req := &tool_executors.ToolRequest{
+		ToolName:   tool.Name,
+		Endpoint:   tool.Endpoint,
+		Parameters: params,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log.Infof("Agent %d dispatching tool '%s' to %s executor (endpoint: %s)",
+		a.AgentId, tool.Name, execType, tool.Endpoint)
+	resp, err := a.toolDispatcher.Dispatch(ctx, execType, req)
+	if err != nil {
+		log.Errorf("Agent %d tool '%s' execution failed: %v", a.AgentId, tool.Name, err)
+		return nil, err
+	}
+	if !resp.Success {
+		log.Warnf("Agent %d tool '%s' returned error: %s", a.AgentId, tool.Name, resp.Error)
+		return map[string]interface{}{
+			"status": "failed",
+			"error":  resp.Error,
+		}, nil
+	}
+
+	return resp.Data, nil
 }

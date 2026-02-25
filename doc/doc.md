@@ -328,7 +328,57 @@ Summary Region stores compressed snapshots of Memory Region to resolve the confl
 
 **Passive References**: Agents are not actively notified upon Summary generation. Agents access the Summary Region under two conditions: 1. When an Agent proactively queries for historical context. 2. When directed by another Agent via the Comm Region—where the directing Agent sends a key reference to the Summary Region through a Watcher, prompting the receiving Agent to retrieve the corresponding summary content.
 
+**4. Tool Region**
+
+The Tool Region maintains a registry of external tool definitions and tracks execution history within a MemSpace. It provides a structured interface for Agents to invoke capabilities outside the core memory system.
+
+**Definition Storage:** Tool definitions are persisted as structured schemas containing name, description, parameter specifications, and endpoint configuration. These definitions are stored in the underlying KV store and are shared among all Agents bound to the MemSpace.example:
+
+```go
+// MockLintToolDefinition returns the mock_lint tool definition
+func MockLintToolDefinition(endpoint string) *configs.ToolDefinition {
+	return &configs.ToolDefinition{
+		Name:        "mock_lint",
+		Description: "A mock linter tool that checks code for violations",
+		Tags:        []string{"static-analysis", "code-tools", "test"},
+		Parameters: []configs.ToolParam{
+			{
+				Name:     "path",
+				Type:     "string",
+				Required: true,
+				Default:  "",
+			},
+			{
+				Name:     "config",
+				Type:     "string",
+				Required: false,
+				Default:  ".eslintrc",
+			},
+		},
+		ReturnType: "object",
+		Endpoint:   endpoint,
+		ExecType:   "http",
+		Metadata: map[string]string{
+			"version": "1.0.0",
+			"author":  "test",
+		},
+		CreatedAt: 0,
+	}
+}
+
+```
+
+**Execution Model:** Tool invocations are processed through the Agent's task queue. When a tool call is identified (typically via LLM output parsing), a tool task is created and dispatched to an Executor layer. The Executor abstracts the communication protocol (e.g., HTTP), allowing different tool types to be supported without modifying core Agent logic.
+
+**Execution Records:** Each invocation is recorded with a unique sequence number, capturing input parameters, output results, execution status, and timestamps. This history supports audit requirements and provides context for subsequent operations.
+
+**Agent Integration:** Agents query the Tool Region to discover available capabilities. During conversation processing, tool schemas are provided to the LLM to determine if external action is required. If a tool call is generated, the execution result is returned to the conversation context upon completion.
+
+
+
 ### 2.4 Agent
+
+#### 2.4.1 Task Queue
 
 At its core, Agent operates on a task queue-driven execution model. All external requests—such as user conversations, collaboration notifications, and more—are encapsulated as tasks and submitted to an internal queue. These tasks are then processed sequentially by background coroutines.
 
@@ -340,6 +390,31 @@ Although tasks are processed in submission order, strict end-to-end sequencing c
 Agent itself does not store business state. All persistent data is managed through MemSpace, while Agent maintains only temporary conversation context and task scheduling logic.
 
 > The Agent architecture can be extended to support multi-level queue scheduling, ensuring tasks with varying workloads are distributed effectively. However, as this is a demo, we won't elaborate further here.
+
+#### 2.4.2  Recall Queue
+
+To support synchronous request-response patterns over an asynchronous task execution model, Agent implements a **Recall Queue** (Task Result Tracking Mechanism). While the Task Queue handles work distribution, the Recall Queue manages the lifecycle of task results, allowing external callers (e.g., other Agents via `Notify`) to wait for completion without blocking the main processing loop.
+
+**Mechanism** When a task is submitted via `SubmitTask`, a unique **TaskID** is generated (if not already provided). Simultaneously, a result tracking entry is created in an in-memory map (`taskResults`), containing a `Done` channel and placeholders for the result and error. The TaskID is returned to the caller, who can then invoke `GetTaskResult` to wait asynchronously.
+
+**Lifecycle**
+
+1. **Creation:** Upon task submission, a `TaskResult` object is initialized and stored keyed by TaskID.
+2. **Completion:** When the background worker finishes processing (e.g., `handleChatTask` completes), it invokes `SetTaskResult`, which writes the response and closes the `Done` channel.
+3. **Retrieval:** The caller blocks on the `Done` channel until signaled. Once closed, the result is retrieved, and the tracking entry is cleaned up to prevent memory leaks.
+4. **Timeout:** To prevent indefinite hanging (e.g., if a task stalls), `GetTaskResult` enforces a configurable timeout (e.g., 30s). If exceeded, the wait aborts, and an error is returned.
+
+**Task Chaining & ID Inheritance** A critical feature of the Recall Queue is **TaskID inheritance** across task types. For instance, when a `comm` task triggers a subsequent `chat` task (to generate a response), the child task inherits the parent's TaskID. This ensures that the external caller waiting for the `comm` task ultimately receives the final result from the `chat` processing, maintaining end-to-end transparency despite internal task splitting.
+
+**State Management** Similar to the Task Queue, the Recall Queue holds only **transient execution state**. It does not persist business data. All tracking entries are stored in memory and are lost upon Agent restart, which is acceptable as they represent in-flight operations rather than durable business records.
+
+**Extensibility** This design decouples task execution from result retrieval. Future extensions could include:
+
+- **Priority Recall:** High-priority tasks (e.g., emergency alerts) could bypass standard queues but still track results via this mechanism.
+- **Batch Recall:** Waiting for multiple task results simultaneously (e.g., `WaitGroup` pattern).
+- **Persistent Tracking:** For long-running tasks (hours/days), the tracking state could be offloaded to Redis or a database, though this is beyond the current scope.
+
+By combining the Task Queue (for throughput) and the Recall Queue (for responsiveness), Agent achieves a balanced architecture capable of handling both fire-and-forget operations and synchronous collaborative dialogues.
 
 ### 2.5 Task Decomposition
 
@@ -358,76 +433,174 @@ ViewSpace = Represented Agent (coordinator)
 
 This is analogous to a self-contained "room" where a group of agents collaborate on a bounded sub-problem. All communication within a ViewSpace happens through its dedicated MemSpace, following the blackboard pattern described in §1.2.2. No direct message passing between agents is required.
 
-**Two Forms of ViewSpace**
-
-A ViewSpace exists in exactly one of two forms:
-
-**Composite ViewSpace** — A coordination unit that contains child ViewSpaces. Its Represented Agent is responsible for decomposing the task, spawning children, and aggregating their results. It does not directly execute work itself.
-
-**Atomic ViewSpace** — The minimal execution unit. It contains no child ViewSpaces. Its agents directly perform work using tools and write results to the shared MemSpace. An Atomic ViewSpace is determined by the following termination criteria (defined at the system level, not by the LLM):
-
-```tex
-A ViewSpace is Atomic if any of the following holds:
-  · The task can be fully described within a single LLM context window
-  · The task involves only tool calls with no further planning required
-  · The task requires only a single agent role
-```
-
 **The ViewSpace Tree**
 
 A task decomposition is represented as a **ViewSpace Tree**: a rooted, ordered tree where each node is a ViewSpace. The tree is dynamically generated at runtime by the Represented Agent of the root node, and may be recursively deepened as composite nodes spawn their own children.
 
 ```
-Root ViewSpace (Composite)
-├── Child A (Composite)
+Root ViewSpace (Global)
+├── Child A (Process)
 │   ├── Child A1 (Atomic)  ← actual work happens here
 │   └── Child A2 (Atomic)
 └── Child B (Atomic)
 ```
 
-**Key structural properties**
+![ViewTree](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/ViewTree.png)
 
-- **Isolation**: Each ViewSpace has its own dedicated MemSpace. A failure within one ViewSpace does not directly corrupt the state of sibling nodes.
-- **Contract enforcement**: Every ViewSpace declares an input contract (what it requires) and an output contract (what it promises to produce). These contracts are written into the MemSpace at creation time and are immutable. The internal complexity of a ViewSpace is invisible to its parent — only the output contract matters.
-- **Bottom-up completion**: A Composite ViewSpace is considered complete only when all of its child ViewSpaces have fulfilled their output contracts. Completion signals propagate upward through the tree.
+**The Formation of the ViewSpace in ViewSpace Tree**
 
-The execution of a ViewSpace Tree follows a recursive pattern:
+- Global ViewSpace
 
-```
-execute(ViewSpace):
-  if Atomic:
-    agents read input from MemSpace
-    agents perform work (LLM inference + tool calls)
-    agents write result to MemSpace (fulfilling output contract)
-    signal completion to parent
-    
-  if Composite:
-    Represented Agent reads input contract
-    Represented Agent calls LLM to decompose task → generates child ViewSpace definitions (JSON)
-    for each child: create ViewSpace, mount MemSpace, assign agents
-    wait for all children to signal completion (respecting dependency order)
-    Represented Agent aggregates child outputs
-    write aggregated result to own MemSpace (fulfilling output contract)
-    signal completion to parent
-```
+​		 A global task feedback queue will be maintained within the task area in the memspace of Global ViewSpace. This queue records how tasks are decomposed—either provided statically by users or decomposed by the LLM according to specific paradigms. Each node in the queue maintains a Done channel to receive the task's completion status and communication methods for Process ViewSpace.
 
-Cross-sibling dependencies (e.g., Child A2 depends on Child A1's output) are expressed as a partial order within the parent's MemSpace. The parent's Represented Agent is responsible for respecting this order when spawning children.
+​		For task auditing purposes, Global ViewSpace must maintain comprehensive tool usage logs and Agent decisions. Therefore, it must be bound to all Agents (this can be disabled under non-mandatory auditing conditions to avoid write amplification).
 
-#### Known Limitations and Open Problems
+- Process ViewSpace
+
+​		The intermediate nodes of the ViewSpace Tree serve to isolate permission domains, decompose tasks downward, and report task progress upward.
+
+- Atomic ViewSpace
+
+​		The nodes of the entire ViewSpace Tree that execute actual tools. Based on task requirements, RepresentedAgent reads tools from the specified (or autonomously selected) memspace within the Tool region, encapsulates them into a tool Task, and hands it over to the task queue. After the task queue executes the Task, it feeds the execution results back to the Process ViewSpace.
+
+**Known Limitations and Open Problems**
 
 The current design acknowledges several unresolved challenges that are deferred beyond the demo phase:
 
-**Decomposition reliability**: The quality of the ViewSpace Tree is entirely dependent on the LLM's output. There is no built-in mechanism to evaluate whether a decomposition is well-formed in terms of granularity consistency or completeness. Malformed decompositions (e.g., circular dependencies, mismatched contracts) must be caught at parse time and returned to the LLM for correction.
+**Decomposition reliability**: The quality of the ViewSpace Tree is entirely dependent on the LLM's output. There is no built-in mechanism to evaluate whether a decomposition is wel8l-formed in terms of granularity consistency or completeness. Malformed decompositions (e.g., circular dependencies, mismatched contracts) must be caught at parse time and returned to the LLM for correction.
 
 **Dynamic re-decomposition**: If a child ViewSpace discovers mid-execution that the task was incorrectly scoped, the protocol for modifying the tree (in-place mutation vs. subtree replacement) is not yet defined.
 
 **Cross-sibling communication**: The current model routes all inter-sibling communication through the parent's MemSpace. For deeply nested trees this introduces latency and complexity that has not been fully analyzed.
 
-#### 2.5.2 Parsers and Generators
+#### 2.5.2 Regulation In Decomposition
 
-#### 2.5.4 regulation
+The entire task decomposition process can be summarized in the Flow below:
 
-#### 2.5.5 authority
+```tex
+user task → LLM decomposition → raw JSON → Parser  → regulation check → ViewSpace Tree
+                         ↑                              │
+                         └──── retry ←──────────────────┘
+```
+
+**1. Schema**
+
+```json
+{
+  "meta": { ... },
+  "viewspaces": [ ... ],
+  "dependencies": [ ... ]
+}
+```
+
+**1.1 Meta Definition**
+
+Meta is the meta data of the task
+
+```json
+{
+  "meta": {
+    "task_id": "code-quality-review-001",
+    "description": "Analyze the code quality of Project X and provide recommendations for improvement.",
+    "created_by": "user | llm",
+    "max_retry": 3,
+    "global_constraints": {
+      "audit_mode": "full | summary"
+    }
+  }
+}
+```
+
+**1.2 ViewSpace Definition**
+
+```json
+{
+  "viewspaces": [
+    // Global ViewSpace
+    {
+      "name": "root",
+      "type": "global",
+      "tags": ["code-review", "management"],
+      "description": "Global Coordination: Receive results from all subtasks and generate the final report.",
+      "represented_agent": {
+        "AgentID":xxx
+        "role": "Technical Director",
+      },
+    },
+    // Process ViewSpace
+    {
+      "name": "analysis-group",
+      "type": "process",
+      "tags": ["code-review", "analysis", "coordination"],
+      "description": "Coordinate all analytical subtasks, isolate analytical domain permissions, and consolidate analytical results.",
+      "represented_agent": {
+        "role": "Head of the Analysis Team"
+      },
+      "worker_agents": [
+        {"AgentID": xxx, "role": "Analysis"},
+      ],
+      "memspace_selector": {
+        "match_tags": ["static-analysis", "code-tools"],
+        "prefer_tags": ["high-performance"]
+      },
+    },
+    // Atomic ViewSpace
+    {
+      "name": "static-analysis",
+      "type": "atomic",
+      "tags": ["code-review", "lint", "metrics"],
+      "description": "Run static analysis tools to collect code complexity metrics and identify violations of coding standards.",
+      "represented_agent": {
+        "AgentID":xxx
+        "role": "Static Analysis Engineer"
+      },
+      "worker_agents": [
+        {"AgentID": xxx, "role": "Analysis"},
+      ],
+      "tools": {
+        "required": ["lint", "complexity_analyzer"],
+      },
+      "memspace_selector": {
+        "match_tags": ["static-analysis", "code-tools"],
+        "prefer_tags": ["high-performance"]
+      },
+    },
+  ]
+}
+```
+
+**1.3 Dependency Definition**
+
+```json
+{
+  "dependencies": {
+      // the structure of the ViewSpace Tree
+    "tree": [
+      { "parent": "root",           "children": ["analysis-group", "synthesis"] },
+      { "parent": "analysis-group", "children": ["static-analysis", "security-scan"] }
+    ],
+      // the dataflow between the ViewSpace
+    "dataflow": [
+      {
+        "from": "static-analysis",
+        "to": "synthesis",
+        "fields": ["metrics", "violations"],
+        "description": "Static analysis metric data flows into the comprehensive report"
+      },
+      {
+        "from": "security-scan",
+        "to": "synthesis",
+        "fields": ["vulnerabilities", "severity_summary"],
+        "description": "Security scan results are incorporated into the comprehensive report."
+      }
+    ]
+  }
+}
+```
+
+#### 2.5.3 Security
+
+
 
 > **todo**: after the demo finished.
 >
@@ -439,9 +612,11 @@ The current design acknowledges several unresolved challenges that are deferred 
 
 
 
+#### 2.5.4 Task Region
+
+The task region exists in two distinct forms for Atomic ViewSpaces and Process ViewSpaces. The former stores the dependency graph of tools within that ViewSpace, while the latter stores the dependency graph between ViewSpaces.
 
 
-## 3. Future
 
 
 

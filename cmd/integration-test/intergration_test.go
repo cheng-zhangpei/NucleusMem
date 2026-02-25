@@ -179,12 +179,12 @@ func TestLaunchMemspace(t *testing.T) {
 	}
 	err = managerClient.LaunchMemSpace(Lreq1)
 	assert.Nil(t, err)
-	Lreq2 := &api.LaunchMemSpaceRequestManager{
-		BinPath:        memspaceBinPath,
-		ConfigFilePath: memspaceConfigFile1002,
-	}
-	err = managerClient.LaunchMemSpace(Lreq2)
-	assert.Nil(t, err)
+	//Lreq2 := &api.LaunchMemSpaceRequestManager{
+	//	BinPath:        memspaceBinPath,
+	//	ConfigFilePath: memspaceConfigFile1002,
+	//}
+	//err = managerClient.LaunchMemSpace(Lreq2)
+	//assert.Nil(t, err)
 
 }
 

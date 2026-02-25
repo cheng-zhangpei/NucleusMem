@@ -3,6 +3,7 @@ package memspace
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -288,6 +289,169 @@ func (s *MemSpaceHTTPServer) handleGetByKey(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(resp)
 }
 
+// POST /api/v1/memspace/tool/get
+func (s *MemSpaceHTTPServer) handleGetTool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		http.Error(w, "tool name is required", http.StatusBadRequest)
+		return
+	}
+
+	tool, err := s.memSpace.ToolRegion.GetTool(req.Name)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Tool not found: %v", err),
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	resp := struct {
+		Success bool                    `json:"success"`
+		Tool    *configs.ToolDefinition `json:"tool"`
+	}{
+		Success: true,
+		Tool:    tool,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tools/list
+func (s *MemSpaceHTTPServer) handleListTools(w http.ResponseWriter, r *http.Request) {
+	tools, err := s.memSpace.ToolRegion.ListTools()
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to list tools: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool                      `json:"success"`
+		Tools   []*configs.ToolDefinition `json:"tools"`
+	}{
+		Success: true,
+		Tools:   tools,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tool/register
+func (s *MemSpaceHTTPServer) handleRegisterTool(w http.ResponseWriter, r *http.Request) {
+	var req configs.ToolDefinition
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	err := s.memSpace.ToolRegion.RegisterTool(&req)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to register tool: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool `json:"success"`
+	}{
+		Success: true,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tool/delete
+func (s *MemSpaceHTTPServer) handleDeleteTool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	err := s.memSpace.ToolRegion.DeleteTool(req.Name)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to delete tool: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool `json:"success"`
+	}{
+		Success: true,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tool/find_by_tags
+func (s *MemSpaceHTTPServer) handleFindToolsByTags(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tags []string `json:"tags"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	tools, err := s.memSpace.ToolRegion.FindToolsByTags(req.Tags)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to find tools: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool                      `json:"success"`
+		Tools   []*configs.ToolDefinition `json:"tools"`
+	}{
+		Success: true,
+		Tools:   tools,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
 // Start initializes and starts the HTTP server
 func (s *MemSpaceHTTPServer) Start() error {
 	mux := http.NewServeMux()
@@ -304,6 +468,16 @@ func (s *MemSpaceHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/memspace/bind_agent", s.handleBindAgent)
 	mux.HandleFunc("/api/v1/memspace/unbind_agent", s.handleUnbindAgent)
 	mux.HandleFunc("/api/v1/memspace/get_by_key", s.handleGetByKey)
+	// tool operation
+	mux.HandleFunc("/api/v1/memspace/tool/get", s.handleGetTool)
+	mux.HandleFunc("/api/v1/memspace/tools/list", s.handleListTools)
+	mux.HandleFunc("/api/v1/memspace/tool/register", s.handleRegisterTool)
+	mux.HandleFunc("/api/v1/memspace/tool/delete", s.handleDeleteTool)
+	mux.HandleFunc("/api/v1/memspace/tool/find_by_tags", s.handleFindToolsByTags)
+	// task operation
+
+	// dependency operation
+
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

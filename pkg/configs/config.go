@@ -76,3 +76,23 @@ const (
 	MemSpaceStatusStopping MemSpaceStatus = "stopping" // Being shut down
 	MemSpaceStatusStopped  MemSpaceStatus = "stopped"  // Fully stopped
 )
+
+type ToolDefinition struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Tags        []string          `json:"tags,omitempty"` // the tag of the tools
+	Parameters  []ToolParam       `json:"parameters,omitempty"`
+	ReturnType  string            `json:"return_type,omitempty"` // "string", "object", "list"
+	Endpoint    string            `json:"endpoint,omitempty"`    // HTTP endpoint or function name
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	CreatedAt   int64             `json:"created_at"`
+	ExecType    string            `json:"exec_type"` // "http", "shell", "mcp", "grpc"
+
+}
+
+type ToolParam struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"` // "string", "int", "bool", "object"
+	Required bool   `json:"required"`
+	Default  string `json:"default,omitempty"`
+}

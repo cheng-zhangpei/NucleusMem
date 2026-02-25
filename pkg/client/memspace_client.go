@@ -3,6 +3,8 @@ package client
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
+	_ "NucleusMem/pkg/configs"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -239,4 +241,110 @@ func (c *MemSpaceClient) GetMemoryByKey(rawKey []byte) (string, error) {
 	}
 	return resp.Value, nil
 
+}
+
+func (c *MemSpaceClient) GetTool(name string) (*configs.ToolDefinition, error) {
+	req := struct {
+		Name string `json:"name"`
+	}{
+		Name: name,
+	}
+	var resp struct {
+		Success bool                    `json:"success"`
+		Tool    *configs.ToolDefinition `json:"tool,omitempty"`
+		Error   string                  `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/tool/get", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get tool failed: %s", resp.Error)
+	}
+	return resp.Tool, nil
+}
+
+// ListTools returns all tool definitions in this MemSpace
+func (c *MemSpaceClient) ListTools() ([]*configs.ToolDefinition, error) {
+	req := struct{}{} // Empty request body
+
+	var resp struct {
+		Success bool                      `json:"success"`
+		Tools   []*configs.ToolDefinition `json:"tools,omitempty"`
+		Error   string                    `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/tools/list", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("list tools failed: %s", resp.Error)
+	}
+	return resp.Tools, nil
+}
+
+// RegisterTool registers a new tool in this MemSpace
+func (c *MemSpaceClient) RegisterTool(tool *configs.ToolDefinition) error {
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/tool/register", tool, &resp)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("register tool failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// DeleteTool removes a tool from this MemSpace
+func (c *MemSpaceClient) DeleteTool(name string) error {
+	req := struct {
+		Name string `json:"name"`
+	}{
+		Name: name,
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/tool/delete", req, &resp)
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("delete tool failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// FindToolsByTags finds tools matching the given tags
+func (c *MemSpaceClient) FindToolsByTags(tags []string) ([]*configs.ToolDefinition, error) {
+	req := struct {
+		Tags []string `json:"tags"`
+	}{
+		Tags: tags,
+	}
+
+	var resp struct {
+		Success bool                      `json:"success"`
+		Tools   []*configs.ToolDefinition `json:"tools,omitempty"`
+		Error   string                    `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/tool/find_by_tags", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("find tools failed: %s", resp.Error)
+	}
+	return resp.Tools, nil
 }
