@@ -382,7 +382,7 @@ func MockLintToolDefinition(endpoint string) *configs.ToolDefinition {
 
 At its core, Agent operates on a task queue-driven execution model. All external requests—such as user conversations, collaboration notifications, and more—are encapsulated as tasks and submitted to an internal queue. These tasks are then processed sequentially by background coroutines.
 
-![cluster_arch](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/agent_arch.png)
+![task_queue](https://github.com/cheng-zhangpei/NucleusMem/blob/main/doc/img/task_queue.png)
 
 Each task carries a type identifier (e.g., temp_chat, comm, chat), enabling Agent to invoke distinct processing logic based on the type. This design makes adding new task types (such as tool invocations or scheduled tasks) remarkably straightforward—simply register a new handler.
 
