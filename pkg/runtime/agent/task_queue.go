@@ -3,24 +3,32 @@ package agent
 type TaskType string
 
 const (
-	TaskTypeTempChat = "temp_chat"
-	TaskTypeChat     = "chat"
-	TaskTypeComm     = "comm"
-	TaskTypeTool     = "tool"
+	TaskTypeTempChat  = "temp_chat"
+	TaskTypeChat      = "chat"
+	TaskTypeComm      = "comm"
+	TaskTypeTool      = "tool"
+	TaskTypeDecompose = "decompose"
 )
 
 type AgentTask struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Key       string                 `json:"key,omitempty"`
-	Content   string                 `json:"content,omitempty"`
-	ToolName  string                 `json:"tool_name,omitempty"`
-	Params    map[string]interface{} `json:"params,omitempty"`
-	ParentID  string                 `json:"parent_id,omitempty"`
-	Timestamp int64                  `json:"timestamp"`
+	ID        string
+	Type      string
+	Content   string
+	Key       string
+	ToolName  string
+	Params    map[string]interface{}
+	ParentID  string
+	Timestamp int64
+
+	// New fields for decompose task
+	AvailableTools   []string `json:"available_tools,omitempty"`
+	AvailableMemTags []string `json:"available_mem_tags,omitempty"`
+	MaxRetry         int      `json:"max_retry,omitempty"`
 }
 type TaskResult struct {
-	Result string
-	Error  error
-	Done   chan struct{}
+	Result         string
+	Error          error
+	TaskDefinition interface{} `json:"-"` // *viewspace.TaskDefinition
+
+	Done chan struct{}
 }

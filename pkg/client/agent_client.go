@@ -267,3 +267,38 @@ func (c *AgentClient) Communicate(targetAgentID uint64, key, content string) (st
 
 	return resp.Result, nil
 }
+
+// SubmitTask submits a task to the agent's task queue and returns a taskID
+func (c *AgentClient) SubmitTask(req *api.SubmitTaskRequest) (*api.SubmitTaskResponse, error) {
+	var resp api.SubmitTaskResponse
+	err := c.post("/api/v1/agent/submit_task", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("submit task failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("submit task failed: %s", resp.ErrorMessage)
+	}
+	return &resp, nil
+}
+
+// GetTaskResult polls for a task result by taskID
+func (c *AgentClient) GetTaskResult(taskID string, timeout time.Duration) (*api.GetTaskResultResponse, error) {
+	// Set a longer timeout for this call since we're waiting for LLM
+	originalTimeout := c.HttpClient.Timeout
+	c.HttpClient.Timeout = timeout + 5*time.Second
+	defer func() { c.HttpClient.Timeout = originalTimeout }()
+
+	req := &api.GetTaskResultRequest{
+		TaskID:    taskID,
+		TimeoutMs: int64(timeout / time.Millisecond),
+	}
+	var resp api.GetTaskResultResponse
+	err := c.post("/api/v1/agent/task_result", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("get task result failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get task result failed: %s", resp.ErrorMessage)
+	}
+	return &resp, nil
+}

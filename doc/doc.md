@@ -597,9 +597,59 @@ Meta is the meta data of the task
   }
 }
 ```
+#### 2.5.3 ViewSpace Tree Validation Rules
+
+The ViewSpace Tree decomposition engine enforces a set of structural and semantic rules to ensure the generated task graph is valid, executable, and logically sound. These rules are categorized into Hard Rules (validation errors) and Soft Rules (warnings).
+
+- Hard Rules
+
+Hard rules must be satisfied for the TaskDefinition to be considered valid. Violations result in parsing errors that are returned to the LLM for correction.
+
+| Rule ID | Name | Description | Failure Condition |
+| :--- | :--- | :--- | :--- |
+| **META** | Meta Information | The meta section must contain a valid task identifier. | `meta.task_id` is missing or empty. |
+| **H1** | Unique Global Node | The tree must have exactly one root node of type `global`. | Zero or more than one `global` node exists. |
+| **H2** | Atomic Leaf Nodes | Nodes of type `atomic` represent leaf tasks and cannot have children. | An `atomic` node appears as a parent in the `tree` dependencies. |
+| **H3** | Unique Names | All ViewSpace names must be unique across the entire definition. | Duplicate names found in the `viewspaces` list. |
+| **H3b** | Non-Leaf Children | Nodes of type `global` and `process` must coordinate sub-tasks. | A `global` or `process` node has no children in the `tree` dependencies. |
+| **H4** | Tree Connectivity | All nodes must be reachable from the `global` root node. | One or more nodes are disconnected from the main tree. |
+| **H5** | Acyclic Dataflow | Data dependencies must not form circular loops. | A cycle is detected in the `dataflow` edges. |
+| **H8** | Reference Existence | All nodes referenced in dependencies must be defined. | A `parent`, `child`, `from`, or `to` field references an undefined name. |
+| **TOOL-1** | Atomic Tools | Atomic nodes represent tool execution and must specify tools. | An `atomic` node has an empty or missing `tools` list. |
+| **TOOL-2** | Coordination Tools | Coordination nodes (`global`, `process`) do not execute tools directly. | A `global` or `process` node contains a `tools` list. |
+
+- Soft Rules
+
+Soft rules are heuristic checks designed to optimize task structure for performance and maintainability. Violations generate warnings but do not block execution.
+
+| Rule ID | Name | Threshold | Recommendation |
+| :--- | :--- | :--- | :--- |
+| **S2** | Tree Depth | Depth <= 4 | Deep trees increase coordination latency. Consider flattening the structure. |
+| **S3** | Fan-out Limit | Children <= 10 | Nodes with too many children are hard to coordinate. Consider grouping into sub-processes. |
+
+- Validation Flow
+
+The validation process occurs in three phases:
+
+1.  **JSON Decoding**: The raw output is parsed into the `TaskDefinition` struct. Syntax errors are caught here.
+2.  **Hard Rule Checking**: All hard rules (META, H1-H8, TOOL) are evaluated. If any fail, validation stops and errors are returned.
+3.  **Soft Rule Checking**: If hard rules pass, soft rules (S2, S3) are evaluated. Warnings are logged but do not invalidate the definition.
+
+- Error Feedback Format
+
+When validation fails, the errors are formatted into a human-readable string and fed back to the LLM for correction.
+
+Example error feedback:
+
+```text
+Your ViewSpace Tree has the following errors. Please fix them and output the corrected JSON:
+
+1. [H1] no global viewspace found, exactly 1 required
+2. [H2] node 'code-scan': atomic viewspace cannot have children
+3. [TOOL] node 'report': process viewspace should not have tools, only atomic nodes have tools
+```
 
 #### 2.5.3 Security
-
 
 
 > **todo**: after the demo finished.

@@ -5,7 +5,9 @@ import (
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/configs/prompt"
 	tool_executors "NucleusMem/pkg/runtime/agent/executors"
+	"NucleusMem/pkg/viewspace"
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"strconv"
@@ -373,7 +375,8 @@ func (a *Agent) handleTask(task *AgentTask) error {
 
 	case TaskTypeTool:
 		result, err = a.handleToolTask(task)
-
+	case TaskTypeDecompose:
+		result, err = a.handleDecomposeTask(task)
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -863,4 +866,159 @@ func (a *Agent) invokeTool(tool *configs.ToolDefinition, params map[string]inter
 	}
 
 	return resp.Data, nil
+}
+
+func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
+	if task.Content == "" {
+		return "", fmt.Errorf("decompose task requires content (the task description)")
+	}
+
+	maxRetry := task.MaxRetry
+	if maxRetry <= 0 {
+		maxRetry = 3
+	}
+
+	// Collect available tools from bound MemSpaces
+	availableTools := task.AvailableTools
+	if len(availableTools) == 0 {
+		availableTools = a.collectAvailableToolNames()
+	}
+
+	// Build decomposition prompt
+	p := prompt.NewTaskDecomposePrompt(
+		task.Content,
+		availableTools,
+		nil,
+		task.AvailableMemTags,
+	)
+
+	// Convert prompt to ChatMessage slice for ChatCompletion
+	msgs := p.BuildMessages()
+	chatMessages := make([]client.ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		chatMessages = append(chatMessages, client.ChatMessage{
+			Role:    m["role"],
+			Content: m["content"],
+		})
+	}
+
+	var lastErrors string
+	var definition *viewspace.TaskDefinition
+
+	for attempt := 1; attempt <= maxRetry; attempt++ {
+		log.Infof("Agent %d decompose attempt %d/%d", a.AgentId, attempt, maxRetry)
+
+		// Build messages for this attempt
+		currentMessages := make([]client.ChatMessage, len(chatMessages))
+		copy(currentMessages, chatMessages)
+
+		// Append error feedback from previous attempt
+		if lastErrors != "" {
+			currentMessages = append(currentMessages, client.ChatMessage{
+				Role:    "user",
+				Content: lastErrors,
+			})
+		}
+
+		// Call LLM using existing ChatCompletion
+		req := client.ChatCompletionRequest{
+			Messages:    currentMessages,
+			Temperature: 0.3,
+			MaxTokens:   4096,
+		}
+
+		resp, err := a.chatClient.ChatCompletion(req)
+		if err != nil {
+			log.Warnf("Agent %d LLM call failed on attempt %d: %v", a.AgentId, attempt, err)
+			lastErrors = fmt.Sprintf("LLM call failed: %v. Please try again.", err)
+			continue
+		}
+
+		if len(resp.Choices) == 0 {
+			lastErrors = "LLM returned no response. Please try again."
+			continue
+		}
+
+		response := resp.Choices[0].Message.Content
+
+		// Extract JSON from response
+		jsonStr := viewspace.ExtractJSON(response)
+		if jsonStr == "" {
+			lastErrors = "Your response did not contain valid JSON. Please output ONLY a JSON object with meta, viewspaces, and dependencies."
+			log.Warnf("Agent %d attempt %d: no JSON found in response", a.AgentId, attempt)
+			continue
+		}
+
+		// Parse and check
+		result := viewspace.Parse([]byte(jsonStr))
+
+		if result.HasErrors() {
+			lastErrors = result.FormatErrorsForLLM()
+			log.Warnf("Agent %d attempt %d: %d validation errors", a.AgentId, attempt, len(result.Errors))
+			for _, e := range result.Errors {
+				log.Warnf("  %s", e.Error())
+			}
+			continue
+		}
+
+		for _, w := range result.Warnings {
+			log.Warnf("Agent %d decompose warning: %s", a.AgentId, w)
+		}
+
+		definition = result.Definition
+		log.Infof("Agent %d decomposition succeeded on attempt %d: %d viewspaces",
+			a.AgentId, attempt, len(definition.ViewSpaces))
+		break
+	}
+
+	if definition == nil {
+		return "", fmt.Errorf("task decomposition failed after %d attempts, last errors: %s", maxRetry, lastErrors)
+	}
+
+	// Serialize result
+	resultJSON, err := json.MarshalIndent(definition, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize task definition: %w", err)
+	}
+
+	// Store parsed definition for downstream use
+	a.taskResultsMu.Lock()
+	if taskResult, exists := a.taskResults[task.ID]; exists {
+		taskResult.TaskDefinition = definition
+	}
+	a.taskResultsMu.Unlock()
+
+	log.Infof("Agent %d decompose completed: %s (%d viewspaces)",
+		a.AgentId, definition.Meta.TaskID, len(definition.ViewSpaces))
+
+	return string(resultJSON), nil
+}
+
+// collectAvailableToolNames gathers tool names from all bound MemSpaces
+func (a *Agent) collectAvailableToolNames() []string {
+	a.mu.RLock()
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	a.mu.RUnlock()
+
+	seen := map[string]bool{}
+	var tools []string
+
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		toolDefs, err := msClient.ListTools()
+		if err != nil {
+			continue
+		}
+		for _, t := range toolDefs {
+			if !seen[t.Name] {
+				seen[t.Name] = true
+				tools = append(tools, t.Name)
+			}
+		}
+	}
+
+	return tools
 }

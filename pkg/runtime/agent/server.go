@@ -249,6 +249,67 @@ func (s *AgentHTTPServer) handleCommunicate(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(resp)
 }
 
+// POST /api/v1/agent/submit_task
+func (s *AgentHTTPServer) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
+	var req api.SubmitTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, api.SubmitTaskResponse{
+			Success: false, ErrorMessage: "invalid request body",
+		})
+		return
+	}
+
+	task := &AgentTask{
+		Type:             req.Type,
+		Content:          req.Content,
+		AvailableTools:   req.AvailableTools,
+		AvailableMemTags: req.AvailableMemTags,
+		MaxRetry:         req.MaxRetry,
+		ToolName:         req.ToolName,
+		Params:           req.Params,
+	}
+
+	taskID, err := s.agent.SubmitTask(task)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, api.SubmitTaskResponse{
+			Success: false, ErrorMessage: err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.SubmitTaskResponse{
+		Success: true, TaskID: taskID,
+	})
+}
+
+// POST /api/v1/agent/task_result
+func (s *AgentHTTPServer) handleGetTaskResult(w http.ResponseWriter, r *http.Request) {
+	var req api.GetTaskResultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, api.GetTaskResultResponse{
+			Success: false, ErrorMessage: "invalid request body",
+		})
+		return
+	}
+
+	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+
+	result, err := s.agent.GetTaskResult(req.TaskID, timeout)
+	if err != nil {
+		writeJSON(w, http.StatusOK, api.GetTaskResultResponse{
+			Success: false, TaskID: req.TaskID, ErrorMessage: err.Error(), Done: false,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.GetTaskResultResponse{
+		Success: true, TaskID: req.TaskID, Result: result, Done: true,
+	})
+}
+
 // Start initializes and starts the HTTP server
 // addr should be in the format "host:port" (e.g., ":8080")
 func (s *AgentHTTPServer) Start(addr string) error {
@@ -261,6 +322,13 @@ func (s *AgentHTTPServer) Start(addr string) error {
 	mux.HandleFunc("/api/v1/agent/bind_memspace", s.handleBindMemSpace)
 	mux.HandleFunc("/api/v1/agent/unbind_memspace", s.handleUnbindMemSpace)
 	mux.HandleFunc("/api/v1/agent/communicate", s.handleCommunicate)
+	mux.HandleFunc("/api/v1/agent/submit_task", s.handleSubmitTask)
+	mux.HandleFunc("/api/v1/agent/task_result", s.handleGetTaskResult)
 	log.Infof("Agent HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
+}
+func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
 }

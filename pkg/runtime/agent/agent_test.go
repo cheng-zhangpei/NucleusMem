@@ -4,6 +4,8 @@ import (
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/configs/test_utils"
+	tool_executors "NucleusMem/pkg/runtime/agent/executors"
+	"NucleusMem/pkg/viewspace"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -309,4 +311,279 @@ func containsAny(s string, substrs []string) bool {
 		}
 	}
 	return false
+}
+
+const testChatServerAddr = "http://localhost:20001" // your LLM server address, change as needed
+
+func newTestAgentForDecompose() *Agent {
+	dispatcher := tool_executors.NewDispatcher()
+	dispatcher.Register("http", tool_executors.NewHTTPExecutor())
+
+	return &Agent{
+		AgentId:               1,
+		chatClient:            client.NewChatServerClient(testChatServerAddr),
+		memSpaceClients:       make(map[uint64]*client.MemSpaceClient),
+		publicMemSpaceClients: make([]*client.MemSpaceClient, 0),
+		taskResults:           make(map[string]*TaskResult),
+		taskQueue:             make(chan *AgentTask, 100),
+		toolDispatcher:        dispatcher,
+		maxHistory:            10,
+	}
+}
+
+func TestHandleDecomposeTask_BasicDecomposition(t *testing.T) {
+	a := newTestAgentForDecompose()
+
+	task := &AgentTask{
+		ID:               "test-decompose-001",
+		Type:             TaskTypeDecompose,
+		Content:          "Analyze the code quality of a Go project: run linting, check complexity, scan for security issues, and generate a final report.",
+		AvailableTools:   []string{"lint", "complexity_analyzer", "security_scanner", "report_generator"},
+		AvailableMemTags: []string{"code-tools", "static-analysis", "security"},
+		MaxRetry:         3,
+	}
+
+	// Pre-register task result so handleDecomposeTask can store the definition
+	a.taskResults[task.ID] = &TaskResult{Done: make(chan struct{})}
+
+	result, err := a.handleDecomposeTask(task)
+	if err != nil {
+		t.Fatalf("handleDecomposeTask failed: %v", err)
+	}
+
+	if result == "" {
+		t.Fatal("expected non-empty result")
+	}
+
+	// Verify the result is valid JSON
+	var def viewspace.TaskDefinition
+	if err := json.Unmarshal([]byte(result), &def); err != nil {
+		t.Fatalf("result is not valid JSON: %v\nraw result:\n%s", err, result)
+	}
+
+	// Print the result for inspection
+	t.Logf("=== Decomposition Result ===")
+	t.Logf("Task ID: %s", def.Meta.TaskID)
+	t.Logf("Description: %s", def.Meta.Description)
+	t.Logf("ViewSpaces (%d):", len(def.ViewSpaces))
+	for _, vs := range def.ViewSpaces {
+		t.Logf("  - [%s] %s: %s (tools: %v)", vs.Type, vs.Name, vs.Description, vs.Tools)
+	}
+	t.Logf("Tree edges (%d):", len(def.Dependencies.Tree))
+	for _, edge := range def.Dependencies.Tree {
+		t.Logf("  - %s -> %v", edge.Parent, edge.Children)
+	}
+	t.Logf("Dataflow edges (%d):", len(def.Dependencies.Dataflow))
+	for _, edge := range def.Dependencies.Dataflow {
+		t.Logf("  - %s -> %s (fields: %v)", edge.From, edge.To, edge.Fields)
+	}
+
+	// Structural validations
+	// 1. Must have meta
+	if def.Meta.TaskID == "" {
+		t.Error("meta.task_id is empty")
+	}
+
+	// 2. Must have at least one global
+	globalCount := 0
+	for _, vs := range def.ViewSpaces {
+		if vs.Type == "global" {
+			globalCount++
+		}
+	}
+	if globalCount != 1 {
+		t.Errorf("expected exactly 1 global viewspace, got %d", globalCount)
+	}
+
+	// 3. Must have at least one atomic
+	atomicCount := 0
+	for _, vs := range def.ViewSpaces {
+		if vs.Type == "atomic" {
+			atomicCount++
+		}
+	}
+	if atomicCount == 0 {
+		t.Error("expected at least 1 atomic viewspace")
+	}
+
+	// 4. All atomic nodes should have tools
+	for _, vs := range def.ViewSpaces {
+		if vs.Type == "atomic" && len(vs.Tools) == 0 {
+			t.Errorf("atomic viewspace '%s' has no tools", vs.Name)
+		}
+	}
+
+	// 5. Re-run Parse to confirm it passes all checks
+	parseResult := viewspace.Parse([]byte(result))
+	if parseResult.HasErrors() {
+		t.Errorf("parsed result has validation errors:")
+		for _, e := range parseResult.Errors {
+			t.Errorf("  %s", e.Error())
+		}
+	}
+}
+
+func TestHandleDecomposeTask_SimpleTask(t *testing.T) {
+	a := newTestAgentForDecompose()
+
+	task := &AgentTask{
+		ID:             "test-decompose-simple",
+		Type:           TaskTypeDecompose,
+		Content:        "Run a linter on the source code and report violations.",
+		AvailableTools: []string{"lint"},
+		MaxRetry:       3,
+	}
+
+	a.taskResults[task.ID] = &TaskResult{Done: make(chan struct{})}
+
+	result, err := a.handleDecomposeTask(task)
+	if err != nil {
+		t.Fatalf("handleDecomposeTask failed: %v", err)
+	}
+
+	var def viewspace.TaskDefinition
+	if err := json.Unmarshal([]byte(result), &def); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+
+	t.Logf("Simple task decomposition: %d viewspaces", len(def.ViewSpaces))
+	for _, vs := range def.ViewSpaces {
+		t.Logf("  [%s] %s", vs.Type, vs.Name)
+	}
+
+	// Simple task should not be overly decomposed
+	if len(def.ViewSpaces) > 5 {
+		t.Logf("WARNING: simple task decomposed into %d viewspaces, might be over-split", len(def.ViewSpaces))
+	}
+
+	// Validation
+	parseResult := viewspace.Parse([]byte(result))
+	if parseResult.HasErrors() {
+		for _, e := range parseResult.Errors {
+			t.Errorf("validation error: %s", e.Error())
+		}
+	}
+}
+
+func TestHandleDecomposeTask_EmptyContent(t *testing.T) {
+	a := newTestAgentForDecompose()
+
+	task := &AgentTask{
+		ID:      "test-decompose-empty",
+		Type:    TaskTypeDecompose,
+		Content: "",
+	}
+
+	_, err := a.handleDecomposeTask(task)
+	if err == nil {
+		t.Error("expected error for empty content")
+	}
+}
+
+func TestHandleDecomposeTask_ViaSubmitTask(t *testing.T) {
+	a := newTestAgentForDecompose()
+
+	task := &AgentTask{
+		Type:           TaskTypeDecompose,
+		Content:        "Build a REST API with user authentication and deploy it.",
+		AvailableTools: []string{"code_generator", "test_runner", "docker_builder", "deploy_tool"},
+		MaxRetry:       3,
+	}
+
+	taskID, err := a.SubmitTask(task)
+	if err != nil {
+		t.Fatalf("SubmitTask failed: %v", err)
+	}
+
+	t.Logf("Submitted task: %s", taskID)
+
+	// Process the task manually (since we didn't start the task loop)
+	select {
+	case queued := <-a.taskQueue:
+		err := a.handleTask(queued)
+		if err != nil {
+			t.Fatalf("handleTask failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no task received from queue")
+	}
+
+	// Get result
+	result, err := a.GetTaskResult(taskID, 60*time.Second)
+	if err != nil {
+		t.Fatalf("GetTaskResult failed: %v", err)
+	}
+
+	// Verify
+	var def viewspace.TaskDefinition
+	if err := json.Unmarshal([]byte(result), &def); err != nil {
+		t.Fatalf("result is not valid JSON: %v\n%s", err, result)
+	}
+
+	t.Logf("=== Via SubmitTask Result ===")
+	t.Logf("Task ID: %s", def.Meta.TaskID)
+	t.Logf("ViewSpaces: %d", len(def.ViewSpaces))
+	for _, vs := range def.ViewSpaces {
+		t.Logf("  [%s] %s (role: %s, tools: %v)", vs.Type, vs.Name, vs.Role, vs.Tools)
+	}
+
+	parseResult := viewspace.Parse([]byte(result))
+	if parseResult.HasErrors() {
+		for _, e := range parseResult.Errors {
+			t.Errorf("validation error: %s", e.Error())
+		}
+	}
+}
+
+func TestExtractJSON_Integration(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		wantOk bool
+	}{
+		{
+			name:   "direct json",
+			input:  `{"meta": {"task_id": "test"}, "viewspaces": [], "dependencies": {"tree": [], "dataflow": []}}`,
+			wantOk: true,
+		},
+		{
+			name:   "markdown wrapped",
+			input:  "Here is the plan:\n```json\n{\"meta\": {\"task_id\": \"test\"}, \"viewspaces\": [], \"dependencies\": {\"tree\": [], \"dataflow\": []}}\n```\nDone!",
+			wantOk: true,
+		},
+		{
+			name:   "text with embedded json",
+			input:  "I think we should do this: {\"meta\": {\"task_id\": \"test\"}, \"viewspaces\": [], \"dependencies\": {\"tree\": [], \"dataflow\": []}} what do you think?",
+			wantOk: true,
+		},
+		{
+			name:   "no json at all",
+			input:  "I don't know how to help with that.",
+			wantOk: false,
+		},
+		{
+			name:   "broken json",
+			input:  "{\"meta\": {\"task_id\": broken",
+			wantOk: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := viewspace.ExtractJSON(tt.input)
+			if tt.wantOk && result == "" {
+				t.Error("expected to extract JSON but got empty")
+			}
+			if !tt.wantOk && result != "" {
+				t.Errorf("expected no JSON but got: %s", result)
+			}
+			if result != "" {
+				// Verify it's actually valid JSON
+				var js json.RawMessage
+				if err := json.Unmarshal([]byte(result), &js); err != nil {
+					t.Errorf("extracted string is not valid JSON: %v", err)
+				}
+			}
+		})
+	}
 }

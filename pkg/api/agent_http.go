@@ -75,3 +75,32 @@ type CommunicateResponse struct {
 	Success      bool   `json:"success"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
+
+type SubmitTaskRequest struct {
+	Type             string                 `json:"type"` // "decompose", "chat", "tool", etc.
+	Content          string                 `json:"content"`
+	AvailableTools   []string               `json:"available_tools,omitempty"`
+	AvailableMemTags []string               `json:"available_mem_tags,omitempty"`
+	MaxRetry         int                    `json:"max_retry,omitempty"`
+	ToolName         string                 `json:"tool_name,omitempty"`
+	Params           map[string]interface{} `json:"params,omitempty"`
+}
+
+type SubmitTaskResponse struct {
+	Success      bool   `json:"success"`
+	TaskID       string `json:"task_id"`
+	ErrorMessage string `json:"error,omitempty"`
+}
+
+type GetTaskResultRequest struct {
+	TaskID    string `json:"task_id"`
+	TimeoutMs int64  `json:"timeout_ms"` // how long to wait
+}
+
+type GetTaskResultResponse struct {
+	Success      bool   `json:"success"`
+	TaskID       string `json:"task_id"`
+	Result       string `json:"result"`
+	ErrorMessage string `json:"error,omitempty"`
+	Done         bool   `json:"done"`
+}
