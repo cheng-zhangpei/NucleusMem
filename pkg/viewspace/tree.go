@@ -77,9 +77,14 @@ type ViewSpaceNode struct {
 	AgentAddr    string
 	AgentClient  *client.AgentClient
 
-	Status   NodeStatus
-	hasGrown bool
-	tree     *ViewSpaceTree
+	Status         NodeStatus
+	hasGrown       bool
+	tree           *ViewSpaceTree
+	MemSpaceClient *client.MemSpaceClient `json:"-"`
+
+	RepresentedAgentID uint64   `json:"represented_agent_id"`
+	WorkerAgentIDs     []uint64 `json:"worker_agent_ids,omitempty"`
+	SharedMemSpaceIDs  []uint64 `json:"shared_memspace_ids,omitempty"`
 }
 
 // Run is the entry point

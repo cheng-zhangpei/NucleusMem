@@ -1,9 +1,18 @@
 // pkg/viewspace/execute.go
+/*
+the control flow: top->bottom
+the data flow: bottom->top
+the essence of this part is: Recursion + Blocking Wait + Topological Sort Scheduling
+what this file is doing : Simulating Distributed DAG Scheduling Using Single-Machine Multi-Goroutines
+
+*/
 
 package viewspace
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -94,7 +103,6 @@ func (t *ViewSpaceTree) Execute() (*NodeResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("execution failed: %w", err)
 	}
-
 	log.Infof("=== Execution Complete ===")
 	log.Infof("Final result: %+v", result)
 	return result, nil
@@ -118,72 +126,102 @@ func (t *ViewSpaceTree) executeNode(node *ViewSpaceNode) (*NodeResult, error) {
 		return nil, fmt.Errorf("unknown node type: %s", node.Type)
 	}
 }
-
-// executeAtomic runs the actual tools on an atomic node
 func (t *ViewSpaceTree) executeAtomic(node *ViewSpaceNode) (*NodeResult, error) {
-	log.Infof("[Exec] Atomic '%s': executing tools %v", node.Name, node.Tools)
+	log.Infof("[Exec] Atomic '%s': executing via ToolDAG (memspace: %d)",
+		node.Name, node.MemSpaceID)
 
-	// Submit tool tasks to the agent sequentially
-	// (later: use tool DAG for parallel execution)
+	// ============================================================
+	// 1. Submit "tool_dag" task to Agent
+	// Agent will: load DAG from MemSpace → topological schedule → concurrent exec
+	// ============================================================
+	submitReq := &api.SubmitTaskRequest{
+		Type:    "tool_dag",
+		Content: fmt.Sprintf("Execute tools for atomic node: %s", node.Name),
+		Params: map[string]interface{}{
+			"memspace_id": node.MemSpaceID,
+		},
+	}
+
+	// Submit task
+	submitResp, err := node.AgentClient.SubmitTask(submitReq)
+	if err != nil {
+		node.mu.Lock()
+		node.Status = NodeStatusFailed
+		node.mu.Unlock()
+		return &NodeResult{
+			NodeName: node.Name,
+			Status:   "failed",
+			Error:    fmt.Sprintf("submit tool_dag task: %v", err),
+		}, nil
+	}
+	log.Infof("[Exec] '%s': submitted tool_dag task %s", node.Name, submitResp.TaskID)
+
+	// ============================================================
+	// 2. Wait for completion (with timeout)
+	// ============================================================
+	resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 5*time.Minute)
+	if err != nil {
+		node.mu.Lock()
+		node.Status = NodeStatusFailed
+		node.mu.Unlock()
+		return &NodeResult{
+			NodeName: node.Name,
+			Status:   "failed",
+			Error:    fmt.Sprintf("wait tool_dag result timeout: %v", err),
+		}, nil
+	}
+
+	if resultResp.ErrorMessage != "" {
+		node.mu.Lock()
+		node.Status = NodeStatusFailed
+		node.mu.Unlock()
+		return &NodeResult{
+			NodeName: node.Name,
+			Status:   "failed",
+			Error:    resultResp.ErrorMessage,
+		}, nil
+	}
+
+	// ============================================================
+	// 3. Parse and aggregate results
+	// Agent returns: JSON string of map[string]*ToolExecResult
+	// ============================================================
+	var toolResults map[string]*configs.ToolExecResult
+	if err := json.Unmarshal([]byte(resultResp.Result), &toolResults); err != nil {
+		// Fallback: return raw result if parse fails
+		log.Warnf("[Exec] '%s': failed to parse tool results: %v", node.Name, err)
+		node.mu.Lock()
+		node.Status = NodeStatusDone
+		node.mu.Unlock()
+		return &NodeResult{
+			NodeName: node.Name,
+			Status:   "completed",
+			Output:   map[string]interface{}{"raw_result": resultResp.Result},
+		}, nil
+	}
+
+	// Aggregate outputs from all tools
 	allOutput := make(map[string]interface{})
-
-	for _, toolName := range node.Tools {
-		log.Infof("[Exec] '%s': running tool '%s'", node.Name, toolName)
-		// Submit tool task
-		submitReq := &api.SubmitTaskRequest{
-			Type:     "tool",
-			ToolName: toolName,
-			Content:  node.Description,
+	for toolName, res := range toolResults {
+		allOutput[toolName] = res.Output
+		if res.Status != "completed" {
+			log.Warnf("[Exec] '%s': tool '%s' status: %s, error: %s",
+				node.Name, toolName, res.Status, res.Error)
 		}
-
-		submitResp, err := node.AgentClient.SubmitTask(submitReq)
-		if err != nil {
-			node.Status = NodeStatusFailed
-			return &NodeResult{
-				NodeName: node.Name,
-				Status:   "failed",
-				Error:    fmt.Sprintf("submit tool '%s': %v", toolName, err),
-			}, nil
-		}
-
-		// Wait for tool result
-		resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 60*time.Second)
-		if err != nil {
-			node.Status = NodeStatusFailed
-			return &NodeResult{
-				NodeName: node.Name,
-				Status:   "failed",
-				Error:    fmt.Sprintf("tool '%s' timeout: %v", toolName, err),
-			}, nil
-		}
-
-		if resultResp.ErrorMessage != "" {
-			log.Warnf("[Exec] '%s' tool '%s' failed: %s", node.Name, toolName, resultResp.ErrorMessage)
-			node.Status = NodeStatusFailed
-			return &NodeResult{
-				NodeName: node.Name,
-				Status:   "failed",
-				Error:    fmt.Sprintf("tool '%s': %s", toolName, resultResp.ErrorMessage),
-			}, nil
-		}
-
-		// Store tool output
-		allOutput[toolName] = resultResp.Result
-		log.Infof("[Exec] '%s' tool '%s' completed", node.Name, toolName)
 	}
 
 	node.mu.Lock()
 	node.Status = NodeStatusDone
 	node.mu.Unlock()
 
-	result := &NodeResult{
+	log.Infof("[Exec] Atomic '%s' completed: %d tools executed",
+		node.Name, len(toolResults))
+
+	return &NodeResult{
 		NodeName: node.Name,
 		Status:   "completed",
 		Output:   allOutput,
-	}
-
-	log.Infof("[Exec] Atomic '%s' done: %d tool outputs", node.Name, len(allOutput))
-	return result, nil
+	}, nil
 }
 
 // executeComposite runs a process or global node:
@@ -204,9 +242,17 @@ func (t *ViewSpaceTree) executeComposite(node *ViewSpaceNode) (*NodeResult, erro
 			Output:   map[string]interface{}{"note": "no children"},
 		}, nil
 	}
-
 	// Build dependency map from dataflow
 	// A child can start only when all its dataflow dependencies are done
+	// example:
+	/*
+		{
+			//it is a DAG sub graph
+		    "Child A": [],
+		    "Child B": [],
+		    "Child C": ["Child A", "Child B"] // depend on A and B
+		}
+	*/
 	deps := buildDependencyMap(children, dataflow)
 	// Execution context tracks completion
 	execCtx := newExecutionContext(len(children))
@@ -239,6 +285,7 @@ func (t *ViewSpaceTree) executeComposite(node *ViewSpaceNode) (*NodeResult, erro
 				_, done := execCtx.childResults[depName]
 				execCtx.mu.Unlock()
 				if !done {
+					// if done is not nil mean,the result queue get the done signal
 					allDepsDone = false
 					break
 				}
@@ -261,7 +308,7 @@ func (t *ViewSpaceTree) executeComposite(node *ViewSpaceNode) (*NodeResult, erro
 
 	// Collect results and start newly-ready children
 	for i := 0; i < len(children); i++ {
-		cr := <-resultCh // block here until at least one child finish its all task
+		cr := <-resultCh // block here until at least one child finish its all task,
 
 		if cr.err != nil {
 			log.Errorf("[Exec] '%s' child '%s' error: %v", node.Name, cr.name, cr.err)
@@ -271,10 +318,8 @@ func (t *ViewSpaceTree) executeComposite(node *ViewSpaceNode) (*NodeResult, erro
 				Error:    cr.err.Error(),
 			}
 		}
-
 		execCtx.ReportChildDone(cr.result)
-
-		// After a child completes, check if new children can start
+		// try to start the node which have dependencies
 		tryStartReady()
 	}
 

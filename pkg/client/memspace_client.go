@@ -348,3 +348,91 @@ func (c *MemSpaceClient) FindToolsByTags(tags []string) ([]*configs.ToolDefiniti
 	}
 	return resp.Tools, nil
 }
+
+// LoadToolDAG loads the tool dependency graph from MemSpace
+// Returns the DAG structure that defines execution order between tools
+func (c *MemSpaceClient) LoadToolDAG() (*configs.ToolDAG, error) {
+	req := struct{}{} // Empty request, DAG is identified by MemSpaceID in URL path
+	var resp struct {
+		Success bool             `json:"success"`
+		DAG     *configs.ToolDAG `json:"dag,omitempty"`
+		Error   string           `json:"error,omitempty"`
+	}
+	err := c.post("/api/v1/memspace/tool/dag/load", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("load tool DAG failed: %s", resp.Error)
+	}
+	return resp.DAG, nil
+}
+
+// RecordToolExec records a single tool execution result to MemSpace for auditing
+// This is called after each tool completes (or after DAG completes for batch mode)
+func (c *MemSpaceClient) RecordToolExec(toolName string, output map[string]interface{}, errMsg string) error {
+	req := struct {
+		ToolName string                 `json:"tool_name"`
+		Output   map[string]interface{} `json:"output,omitempty"`
+		Error    string                 `json:"error,omitempty"`
+	}{
+		ToolName: toolName,
+		Output:   output,
+		Error:    errMsg,
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	err := c.post("/api/v1/memspace/tool/exec/record", req, &resp)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("record tool exec failed: %s", resp.Error)
+	}
+	return nil
+}
+func (c *MemSpaceClient) GetToolExecHistory(toolName string) ([]*configs.ToolExecRecord, error) {
+	req := struct {
+		ToolName string `json:"tool_name"`
+	}{
+		ToolName: toolName,
+	}
+	var resp struct {
+		Success bool                      `json:"success"`
+		Records []*configs.ToolExecRecord `json:"records,omitempty"`
+		Error   string                    `json:"error,omitempty"`
+	}
+	err := c.post("/api/v1/memspace/tool/exec/history", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get tool exec history failed: %s", resp.Error)
+	}
+	return resp.Records, nil
+}
+
+// RecordToolExecBatch persists multiple tool execution results to MemSpace in a single transaction
+// This is more efficient than calling RecordToolExec multiple times, and ensures atomicity
+// for audit logging after a ToolDAG completes
+func (c *MemSpaceClient) RecordToolExecBatch(results map[string]*configs.ToolExecResult) error {
+	req := struct {
+		Results map[string]*configs.ToolExecResult `json:"results"`
+	}{
+		Results: results,
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	err := c.post("/api/v1/memspace/tool/exec/batch", req, &resp)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("record tool exec batch failed: %s", resp.Error)
+	}
+	return nil
+}

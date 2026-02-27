@@ -4,6 +4,7 @@ package memspace
 import (
 	"NucleusMem/pkg/api"
 	"NucleusMem/pkg/configs"
+	"NucleusMem/pkg/storage"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -452,6 +453,307 @@ func (s *MemSpaceHTTPServer) handleFindToolsByTags(w http.ResponseWriter, r *htt
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (s *MemSpaceHTTPServer) handleLoadToolDAG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Empty request body - DAG is identified by MemSpaceID in the server context
+	var req struct{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	dag, err := s.memSpace.ToolRegion.LoadToolDAG()
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("failed to load tool DAG: %v", err),
+		}
+		// Return 404 if DAG not found, 500 for other errors
+		if err.Error() == "key not found" {
+			w.WriteHeader(http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool             `json:"success"`
+		DAG     *configs.ToolDAG `json:"dag,omitempty"`
+	}{
+		Success: true,
+		DAG:     dag,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tool/exec/record
+// handleRecordToolExec records a single tool execution result for auditing
+// This endpoint is called after each tool completes (for per-tool audit mode)
+func (s *MemSpaceHTTPServer) handleRecordToolExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ToolName string                 `json:"tool_name"`
+		Output   map[string]interface{} `json:"output,omitempty"`
+		Error    string                 `json:"error,omitempty"`
+		Seq      uint64                 `json:"seq,omitempty"` // Optional: execution sequence number
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ToolName == "" {
+		http.Error(w, "tool_name is required", http.StatusBadRequest)
+		return
+	}
+
+	var err error
+	if req.Seq > 0 {
+		// Update existing record by sequence number
+		err = s.memSpace.ToolRegion.CompleteToolExec(req.Seq, req.Output, req.Error)
+	} else {
+		// For batch mode or fallback: record by tool name (less precise)
+		// Note: This is a simplified path; prefer using seq for accurate tracking
+		execKey := fmt.Sprintf("tool/exec/batch/%s", req.ToolName)
+		parseUint, _ := strconv.ParseUint(s.memSpace.ID, 10, 64)
+		rawKey := configs.EncodeKey(configs.ZoneTool, parseUint, []byte(execKey))
+
+		record := configs.ToolExecRecord{
+			ToolName: req.ToolName,
+			Output:   req.Output,
+			Status:   configs.ToolExecCompleted,
+			Error:    req.Error,
+			DoneAt:   time.Now().Unix(),
+		}
+		if req.Error != "" {
+			record.Status = configs.ToolExecFailed
+		}
+
+		data, marshalErr := json.Marshal(record)
+		if marshalErr != nil {
+			err = fmt.Errorf("failed to marshal record: %w", marshalErr)
+		} else {
+			err = s.memSpace.kvClient.Update(func(txn storage.Transaction) error {
+				return txn.Put(rawKey, data)
+			})
+		}
+	}
+
+	resp := struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}{
+		Success: err == nil,
+		Error:   errMsg(err),
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/tool/exec/batch
+// handleRecordToolExecBatch records multiple tool execution results atomically
+// This endpoint is called after an entire ToolDAG completes (for batch audit mode)
+func (s *MemSpaceHTTPServer) handleRecordToolExecBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Results map[string]*configs.ToolExecResult `json:"results"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Results) == 0 {
+		http.Error(w, "results cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Convert configs.ToolExecResult to memspace_region.ToolExecRecord
+	results := make(map[string]*configs.ToolExecResult)
+	for name, res := range req.Results {
+		results[name] = &configs.ToolExecResult{
+			ToolName: res.ToolName,
+			Output:   res.Output,
+			Error:    res.Error,
+			Status:   res.Status,
+			DoneAt:   res.DoneAt,
+		}
+	}
+
+	err := s.memSpace.ToolRegion.RecordToolExecBatch(results)
+	resp := struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}{
+		Success: err == nil,
+		Error:   errMsg(err),
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+func errMsg(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// POST /api/v1/memspace/tool/dag/save
+// handleSaveToolDAG persists a tool dependency graph for an Atomic ViewSpace
+// This endpoint is called during the Grow phase to inject the execution plan
+func (s *MemSpaceHTTPServer) handleSaveToolDAG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		DAG *configs.ToolDAG `json:"dag"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.DAG == nil {
+		http.Error(w, "dag is required", http.StatusBadRequest)
+		return
+	}
+
+	// Optional: validate DAG structure before saving
+	if err := validateToolDAG(req.DAG); err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("invalid DAG: %v", err),
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	err := s.memSpace.SaveToolDAG(req.DAG)
+	resp := struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}{
+		Success: err == nil,
+		Error:   errMsg(err),
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// validateToolDAG performs basic structural validation on a ToolDAG
+func validateToolDAG(dag *configs.ToolDAG) error {
+	if dag == nil {
+		return fmt.Errorf("dag cannot be nil")
+	}
+	if len(dag.Nodes) == 0 {
+		return fmt.Errorf("dag must have at least one node")
+	}
+
+	// Check for duplicate node names
+	names := make(map[string]bool)
+	for _, node := range dag.Nodes {
+		if names[node.ToolName] {
+			return fmt.Errorf("duplicate tool name: %s", node.ToolName)
+		}
+		names[node.ToolName] = true
+	}
+
+	// Check that all edges reference existing nodes
+	for _, edge := range dag.Edges {
+		if !names[edge.From] {
+			return fmt.Errorf("edge 'from' references unknown node: %s", edge.From)
+		}
+		if !names[edge.To] {
+			return fmt.Errorf("edge 'to' references unknown node: %s", edge.To)
+		}
+	}
+
+	return nil
+}
+
+func (s *MemSpaceHTTPServer) handleGetToolExecHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ToolName string `json:"tool_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ToolName == "" {
+		http.Error(w, "tool_name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get internal records from ToolRegion
+	internalRecords, err := s.memSpace.ToolRegion.GetToolExecHistory(req.ToolName)
+
+	// Convert to configs.ToolExecResult for HTTP API
+	var results []*configs.ToolExecResult
+	for _, rec := range internalRecords {
+		results = append(results, &configs.ToolExecResult{
+			ToolName: rec.ToolName,
+			Output:   rec.Output,
+			Error:    rec.Error,
+			Status:   string(rec.Status), // ToolExecStatus -> string
+			Seq:      rec.Seq,
+			DoneAt:   rec.DoneAt,
+		})
+	}
+
+	// Always return success=true with potentially empty list
+	resp := struct {
+		Success bool                      `json:"success"`
+		Records []*configs.ToolExecResult `json:"records"`
+		Error   string                    `json:"error,omitempty"`
+	}{
+		Success: true,
+		Records: results,
+	}
+
+	if err != nil {
+		resp.Error = fmt.Sprintf("query failed: %v", err)
+		log.Warnf("GetToolExecHistory warning: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 // Start initializes and starts the HTTP server
 func (s *MemSpaceHTTPServer) Start() error {
 	mux := http.NewServeMux()
@@ -475,9 +777,14 @@ func (s *MemSpaceHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/memspace/tool/delete", s.handleDeleteTool)
 	mux.HandleFunc("/api/v1/memspace/tool/find_by_tags", s.handleFindToolsByTags)
 	// task operation
-
+	// mux.HandleFunc("/api/v1/memspace/task/dag/load", s.handleLoadTaskDAG)
+	// mux.HandleFunc("/api/v1/memspace/task/complete", s.handleCompleteTask)
 	// dependency operation
-
+	mux.HandleFunc("/api/v1/memspace/tool/dag/load", s.handleLoadToolDAG)
+	mux.HandleFunc("/api/v1/memspace/tool/exec/record", s.handleRecordToolExec)
+	mux.HandleFunc("/api/v1/memspace/tool/exec/batch", s.handleRecordToolExecBatch)
+	mux.HandleFunc("/api/v1/memspace/tool/dag/save", s.handleSaveToolDAG)
+	mux.HandleFunc("/api/v1/memspace/tool/exec/history", s.handleGetToolExecHistory)
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

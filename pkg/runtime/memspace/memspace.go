@@ -413,3 +413,44 @@ func (m *MemSpace) FindToolsByTags(tags []string) ([]*configs.ToolDefinition, er
 func (m *MemSpace) GetToolByName(name string) (*configs.ToolDefinition, error) {
 	return m.ToolRegion.GetTool(name)
 }
+
+// ============================================================
+// Tool DAG Operations (convenience wrappers)
+// ============================================================
+
+// SaveToolDAG persists a tool dependency graph for an Atomic ViewSpace
+func (m *MemSpace) SaveToolDAG(dag *configs.ToolDAG) error {
+	return m.ToolRegion.SaveToolDAG(dag)
+}
+
+// LoadToolDAG retrieves the tool dependency graph for current ViewSpace
+func (m *MemSpace) LoadToolDAG() (*configs.ToolDAG, error) {
+	return m.ToolRegion.LoadToolDAG()
+}
+
+// ============================================================
+// Tool Execution Recording (for audit & debugging)
+// ============================================================
+
+// RecordToolExecStart logs the beginning of a tool execution
+// Returns the unique sequence number for this execution
+func (m *MemSpace) RecordToolExecStart(agentID uint64, toolName string, input map[string]interface{}) (uint64, error) {
+	// Delegate to ToolRegion - returns (seq, error)
+	return m.ToolRegion.RecordToolExec(agentID, toolName, input)
+}
+
+// RecordToolExecComplete marks a tool execution as finished with result
+func (m *MemSpace) RecordToolExecComplete(seq uint64, output map[string]interface{}, errMsg string) error {
+	return m.ToolRegion.CompleteToolExec(seq, output, errMsg)
+}
+
+// RecordToolExecBatch records multiple tool results in a single transaction
+// Useful for atomic recording after a ToolDAG completes
+func (m *MemSpace) RecordToolExecBatch(results map[string]*configs.ToolExecResult) error {
+	return m.ToolRegion.RecordToolExecBatch(results) // ← 直接委托给 ToolRegion，避免重复实现
+}
+
+// GetToolExecHistory returns execution history for a specific tool
+func (m *MemSpace) GetToolExecHistory(toolName string) ([]*configs.ToolExecRecord, error) {
+	return m.ToolRegion.GetToolExecHistory(toolName)
+}

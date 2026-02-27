@@ -14,7 +14,7 @@ type AgentClientAdapter struct {
 	client *client.AgentClient
 }
 
-func NewAgentClientAdapter(addr string) AgentClientI {
+func NewAgentClientAdapter(addr string) *AgentClientAdapter {
 	return &AgentClientAdapter{
 		client: client.NewAgentClient(addr),
 	}

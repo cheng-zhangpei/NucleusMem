@@ -2,6 +2,7 @@ package client
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -161,6 +162,28 @@ func (c *MemSpaceManagerClient) NotifyMemSpaceUpdate(memspaces []api.MemSpaceInf
 	err := c.post("/api/v1/manager/notify_memspaces", req, &resp)
 	if err != nil {
 		return fmt.Errorf("notify memspace update failed: %w", err)
+	}
+	return nil
+}
+
+// SaveToolDAG persists a tool dependency graph to MemSpace
+// This is called during Grow phase to inject the tool execution plan
+func (c *MemSpaceClient) SaveToolDAG(dag *configs.ToolDAG) error {
+	req := struct {
+		DAG *configs.ToolDAG `json:"dag"`
+	}{
+		DAG: dag,
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	err := c.post("/api/v1/memspace/tool/dag/save", req, &resp)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("save tool DAG failed: %s", resp.Error)
 	}
 	return nil
 }

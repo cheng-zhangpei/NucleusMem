@@ -4,6 +4,7 @@ package viewspace
 
 import (
 	"NucleusMem/pkg/api"
+	"NucleusMem/pkg/configs"
 	"fmt"
 	"time"
 
@@ -114,7 +115,25 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 		node.mu.Lock()
 		node.Children = append(node.Children, child)
 		node.mu.Unlock()
+		// Inject the tool Info into memspace
+		if child.Type == "atomic" && len(childDef.Tools) > 0 {
+			dag := &configs.ToolDAG{
+				Nodes: make([]configs.ToolDAGNode, len(childDef.Tools)),
+				Edges: []configs.ToolDAGEdge{},
+			}
+			for i, toolName := range childDef.Tools {
+				dag.Nodes[i] = configs.ToolDAGNode{ToolName: toolName}
+			}
 
+			if child.MemSpaceID > 0 && child.MemSpaceClient != nil {
+				if err := child.MemSpaceClient.SaveToolDAG(dag); err != nil {
+					log.Warnf("[Grow] Failed to save ToolDAG for %s: %v", child.Name, err)
+				} else {
+					log.Infof("[Grow] Injected ToolDAG into %s (memspace: %d)",
+						child.Name, child.MemSpaceID)
+				}
+			}
+		}
 		log.Infof("[Grow] '%s' spawned [%s] '%s' (agent:%d, ms:%d)",
 			node.Name, child.Type, child.Name, child.AgentID, child.MemSpaceID)
 	}

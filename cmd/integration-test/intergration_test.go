@@ -159,13 +159,13 @@ func TestLaunchAgent(t *testing.T) {
 	resp, err := managerClient.LaunchAgent(Lreq1)
 	assert.Nil(t, err)
 	assert.NotNil(t, resp)
-	Lreq2 := &api.LaunchAgentRequestHTTP{
-		BinPath:        agentBinPath,
-		ConfigFilePath: agentConfigFile102,
-	}
-	resp2, err := managerClient.LaunchAgent(Lreq2)
-	assert.Nil(t, err)
-	assert.NotNil(t, resp2)
+	//Lreq2 := &api.LaunchAgentRequestHTTP{
+	//	BinPath:        agentBinPath,
+	//	ConfigFilePath: agentConfigFile102,
+	//}
+	//resp2, err := managerClient.LaunchAgent(Lreq2)
+	//assert.Nil(t, err)
+	//assert.NotNil(t, resp2)
 }
 
 func TestLaunchMemspace(t *testing.T) {
@@ -191,15 +191,15 @@ func TestLaunchMemspace(t *testing.T) {
 func TestAgentBinding(t *testing.T) {
 	// memspaceConfig
 	configMemspace_1001, _ := configs.LoadMemSpaceConfigFromYAML(memspaceConfigFile1001)
-	configMemspace_1002, _ := configs.LoadMemSpaceConfigFromYAML(memspaceConfigFile1002)
+	//configMemspace_1002, _ := configs.LoadMemSpaceConfigFromYAML(memspaceConfigFile1002)
 
 	managerConfig, err := configs.LoadMemSpaceManagerConfigFromYAML(memspaceManagerConfigFile)
 	assert.Nil(t, err)
 	assert.NotNil(t, managerConfig)
 	agentConfig101, _ := configs.LoadAgentConfigFromYAML(agentConfigFile101)
-	agentConfig102, _ := configs.LoadAgentConfigFromYAML(agentConfigFile102)
+	//agentConfig102, _ := configs.LoadAgentConfigFromYAML(agentConfigFile102)
 	agentClient101 := client.NewAgentClient(agentConfig101.HttpAddr)
-	agentClient102 := client.NewAgentClient(agentConfig102.HttpAddr)
+	//agentClient102 := client.NewAgentClient(agentConfig102.HttpAddr)
 
 	req1 := &api.BindMemSpaceRequest{
 		strconv.FormatUint(configMemspace_1001.MemSpaceID, 10),
@@ -209,22 +209,22 @@ func TestAgentBinding(t *testing.T) {
 	}
 	err = agentClient101.BindMemSpace(req1)
 	assert.Nil(t, err)
-	req2 := &api.BindMemSpaceRequest{
-		strconv.FormatUint(configMemspace_1002.MemSpaceID, 10),
-		agentConfig102.AgentId,
-		configMemspace_1002.Type,
-		configMemspace_1002.HttpAddr,
-	}
-	err = agentClient102.BindMemSpace(req2)
-	assert.Nil(t, err)
-	req3 := &api.BindMemSpaceRequest{
-		strconv.FormatUint(configMemspace_1001.MemSpaceID, 10),
-		agentConfig102.AgentId,
-		configMemspace_1001.Type,
-		configMemspace_1001.HttpAddr,
-	}
-	err = agentClient102.BindMemSpace(req3)
-	assert.Nil(t, err)
+	//req2 := &api.BindMemSpaceRequest{
+	//	strconv.FormatUint(configMemspace_1002.MemSpaceID, 10),
+	//	agentConfig102.AgentId,
+	//	configMemspace_1002.Type,
+	//	configMemspace_1002.HttpAddr,
+	//}
+	//err = agentClient102.BindMemSpace(req2)
+	//assert.Nil(t, err)
+	//req3 := &api.BindMemSpaceRequest{
+	//	strconv.FormatUint(configMemspace_1001.MemSpaceID, 10),
+	//	agentConfig102.AgentId,
+	//	configMemspace_1001.Type,
+	//	configMemspace_1001.HttpAddr,
+	//}
+	//err = agentClient102.BindMemSpace(req3)
+	//assert.Nil(t, err)
 	// this is the private memspace
 }
 

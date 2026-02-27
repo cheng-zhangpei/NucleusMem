@@ -649,7 +649,188 @@ Your ViewSpace Tree has the following errors. Please fix them and output the cor
 3. [TOOL] node 'report': process viewspace should not have tools, only atomic nodes have tools
 ```
 
-#### 2.5.3 Security
+
+#### 2.5.3 Runtime of ViewSpaceTree
+
+This section describes the execution model and runtime behavior of the ViewSpaceTree, including node lifecycle management, task scheduling, and tool execution strategies.
+
+##### 2.5.3.1 Overview
+
+The ViewSpaceTree runtime is responsible for transforming a logically decomposed task graph into actual execution. Its core responsibilities are:
+
+1. **Node Lifecycle Management**: Allocate and initialize physical resources (MemSpace + Agent) for each logical ViewSpace node.
+2. **Topological Scheduling**: Execute nodes respecting dataflow dependencies defined in `ChildDataflow`.
+3. **Tool Execution**: Run atomic operations (tools) either sequentially or concurrently based on dependency graphs.
+4. **Result Aggregation**: Collect outputs from child nodes and propagate them upward for final synthesis.
+
+The runtime operates in two distinct phases:
+- **Grow Phase** (`pkg/viewspace/grow.go`): Recursively decomposes tasks and spawns child ViewSpaces.
+- **Execute Phase** (`pkg/viewspace/execute.go`): Traverses the tree bottom-up, executing nodes and aggregating results.
+
+##### 2.5.3.2 Execution Model: Recursion + Topological Scheduling
+
+The execution logic is implemented as a recursive descent with concurrent scheduling at each composite node.
+
+```go
+// Simplified execution flow
+func (t *ViewSpaceTree) executeNode(node *ViewSpaceNode) (*NodeResult, error) {
+    switch node.Type {
+    case "atomic":
+        return t.executeAtomic(node)      // Leaf: run tools
+    case "process", "global":
+        return t.executeComposite(node)   // Internal: schedule children
+    }
+}
+```
+
+- Composite Node Scheduling (`executeComposite`)
+
+For `process` and `global` nodes, children are scheduled based on a **local DAG** derived from `ChildDataflow`:
+
+1. **Dependency Map Construction**: Build `childName -> [dependencies]` from dataflow edges.
+2. **Ready Queue Initialization**: Identify children with no unsatisfied dependencies.
+3. **Concurrent Launch**: Start ready children in separate goroutines.
+4. **Dynamic Ready Check**: As each child completes, re-evaluate which children have become ready.
+5. **Result Aggregation**: Collect all child results and compute node-level output.
+
+This approach enables **maximal concurrency within a node's scope** while respecting explicit data dependencies. It is intentionally localized: each composite node only schedules its direct children, not the entire subtree. This keeps scheduling logic simple and avoids global state complexity.
+
+- Atomic Node Execution (`executeAtomic`)
+
+Atomic nodes represent leaf tasks that invoke external tools. The current implementation supports two execution modes:
+
+| Mode                     | Trigger                                           | Behavior                                                     |
+| ------------------------ | ------------------------------------------------- | ------------------------------------------------------------ |
+| **Sequential**           | `node.Tools` list defined, no ToolDAG in MemSpace | Tools executed one-by-one via Agent HTTP API                 |
+| **Concurrent (ToolDAG)** | ToolDAG found in MemSpace                         | Submit `tool_dag` task to Agent; Agent performs topological scheduling |
+
+The ToolDAG mode delegates concurrency to the Agent layer, which loads the DAG from MemSpace and executes tools with dependency-aware parallelism (see §2.4.1).
+
+##### 2.5.3.3 Node Lifecycle: The `bringToLife`
+
+The `bringToLife` function (`pkg/viewspace/grow.go`) embodies the principle that **a logical task node must be "born" into a physical execution environment before it can do work**.
+
+```go
+func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
+    // 1. Launch MemSpace (persistent state + blackboard)
+    // 2. Launch Agent (stateless compute + LLM interface)
+    // 3. Bind Agent ↔ MemSpace via Manager
+    // 4. Create direct HTTP clients for low-latency communication
+    // 5. Mark node as Ready
+}
+```
+
+- Design Rationale
+
+| Step                 | Purpose                                                      | Why It Matters                                               |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **Launch MemSpace**  | Provides persistent memory, tool registry, and communication blackboard | Enables state inheritance, auditability, and multi-agent collaboration |
+| **Launch Agent**     | Provides LLM reasoning, task parsing, and tool invocation    | Separates compute from storage; agents remain stateless and replaceable |
+| **Bind via Manager** | Establishes routing metadata in the cluster                  | Allows dynamic discovery without hard-coded addresses        |
+| **Direct Clients**   | Node holds `*MemSpaceClient` and `*AgentClient`              | Avoids Manager proxy overhead for frequent operations        |
+
+- Semantic Fields for Collaboration
+
+To support complex collaboration patterns, `ViewSpaceNode` includes optional semantic fields:
+
+```go
+type ViewSpaceNode struct {
+    // ... identity and topology fields ...
+    
+    // Collaboration context
+    RepresentedAgentID uint64   `json:"represented_agent_id"`   // Primary coordinator
+    WorkerAgentIDs     []uint64 `json:"worker_agent_ids,omitempty"`  // Contributing agents
+    SharedMemSpaceIDs  []uint64 `json:"shared_memspace_ids,omitempty"` // Inherited/shared memory spaces
+}
+```
+
+These fields are populated during `bringToLife` based on the decomposition output and enable:
+- **Permission isolation**: Private MemSpaces restrict access to `RepresentedAgentID`
+- **Resource sharing**: `SharedMemSpaceIDs` allow child nodes to read parent context
+- **Audit scoping**: Global ViewSpace can trace actions across all `WorkerAgentIDs`
+
+##### 2.5.3.4 Tool Execution: From Sequential to DAG-Concurrent
+
+- Sequential Mode (Legacy)
+
+When no ToolDAG is present, tools are executed sequentially via the Agent's `SubmitTask` API:
+
+```
+ViewSpace → Agent.SubmitTask(tool) → Agent invokes executor → Result returned
+```
+
+This mode is simple and sufficient for independent tools but does not exploit parallelism.
+
+- Concurrent Mode (ToolDAG)
+
+When a ToolDAG is injected into the node's MemSpace (typically during Grow), execution follows a delegated pattern:
+
+```
+ViewSpace → Agent.SubmitTask(type="tool_dag", memspace_id=X)
+         → Agent loads DAG from MemSpace X
+         → Agent.ToolDAGExecutor: topological schedule + concurrent HTTP calls
+         → Agent aggregates results → Returns JSON string
+         → ViewSpace parses and aggregates output
+```
+
+**Key properties**:
+- **Dependency-aware**: Tools with no unsatisfied dependencies start concurrently.
+- **Fault isolation**: A failed tool does not block unrelated parallel branches.
+- **Audit-native**: Each tool execution is recorded in MemSpace's ToolRegion.
+
+##### 2.5.3.5 Collaboration Protocol: Agent ↔ MemSpace Interaction
+
+All inter-node communication and state management flows through MemSpace, following the "Memory as Communication" principle (§1.2.2).
+
+- Data Flow During Execution
+
+```
+[Parent Process Node]
+        │
+        ▼
+[Child Atomic Node]
+        │
+        ├──► MemSpace: Write tool output to MemoryRegion
+        ├──► MemSpace: Write execution record to ToolRegion
+        └──► MemSpace: Notify via CommRegion (if configured)
+        │
+        ▼
+[Parent] reads child results from MemSpace or direct RPC
+```
+
+- Key Guarantees
+
+| Guarantee          | Mechanism                                                    |
+| ------------------ | ------------------------------------------------------------ |
+| **Consistency**    | Percolator 2PC via TinyKV client ensures atomic writes across regions |
+| **Isolation**      | MemSpace Key prefixing (`/viewspace/{id}/...`) prevents cross-node leakage |
+| **Traceability**   | All writes are timestamped and versioned; history is queryable |
+| **Recoverability** | Node state is persisted; restart resumes from last committed state |
+
+##### 2.5.3.6 Current Limitations
+
+The current runtime implementation has several known constraints:
+
+1. **Single-Machine Simulation**: Concurrency is achieved via goroutines on one host; true distributed scheduling (across nodes) is deferred to the Operator phase.
+2. **Static Resource Allocation**: `bringToLife` launches new MemSpace/Agent processes for each node; reuse of idle resources is not yet implemented.
+3. **No Dynamic Re-decomposition**: If a child node discovers mid-execution that its task scope is incorrect, the tree cannot be mutated in-place.
+4. **Simplified Error Propagation**: Failure in one child marks the parent as `partial`; fine-grained retry or fallback strategies are not yet supported.
+
+These limitations are acknowledged and are targets for future iteration as the system evolves toward production readiness.
+
+##### 2.5.3.7 Future Directions
+
+Planned enhancements to the ViewSpaceTree runtime include:
+
+- **Resource-Aware Scheduling**: Query global resource pools during `bringToLife` to reuse existing MemSpaces/Agents when possible.
+- **Dynamic Re-decomposition Protocol**: Allow subtree replacement or in-place mutation when execution reveals decomposition errors.
+- **Cross-Node Distributed Execution**: Integrate with Kubernetes Operator to schedule ViewSpace nodes across a cluster.
+- **Adaptive Concurrency**: Adjust parallelism based on real-time load metrics and tool execution latency.
+
+These improvements aim to transition the runtime from a functional prototype to a scalable, production-grade orchestration layer for large-scale multi-agent systems.
+
+
+
 
 
 > **todo**: after the demo finished.
@@ -665,8 +846,5 @@ Your ViewSpace Tree has the following errors. Please fix them and output the cor
 #### 2.5.4 Task Region
 
 The task region exists in two distinct forms for Atomic ViewSpaces and Process ViewSpaces. The former stores the dependency graph of tools within that ViewSpace, while the latter stores the dependency graph between ViewSpaces.
-
-
-
 
 

@@ -18,44 +18,11 @@ const ToolDAGKey = "tool/dag"
 // ToolDefinition describes a single tool that agents can invoke
 
 // ToolExecStatus tracks the execution state of a tool call
-type ToolExecStatus string
-
-const (
-	ToolExecPending   ToolExecStatus = "pending"
-	ToolExecRunning   ToolExecStatus = "running"
-	ToolExecCompleted ToolExecStatus = "completed"
-	ToolExecFailed    ToolExecStatus = "failed"
-)
 
 // ToolExecRecord records one execution of a tool
-type ToolExecRecord struct {
-	Seq       uint64                 `json:"seq"`
-	ToolName  string                 `json:"tool_name"`
-	AgentID   uint64                 `json:"agent_id"`
-	Input     map[string]interface{} `json:"input,omitempty"`
-	Output    map[string]interface{} `json:"output,omitempty"`
-	Status    ToolExecStatus         `json:"status"`
-	Error     string                 `json:"error,omitempty"`
-	StartedAt int64                  `json:"started_at,omitempty"`
-	DoneAt    int64                  `json:"done_at,omitempty"`
-}
 
 // ToolDAG describes dependency ordering between tools within an Atomic ViewSpace
 // Reuses the same DAG structure as TaskRegion for consistency
-type ToolDAG struct {
-	Nodes []ToolDAGNode `json:"nodes"`
-	Edges []ToolDAGEdge `json:"edges"`
-}
-
-type ToolDAGNode struct {
-	ToolName string `json:"tool_name"`
-}
-
-type ToolDAGEdge struct {
-	From   string   `json:"from"`
-	To     string   `json:"to"`
-	Fields []string `json:"fields,omitempty"` // which output fields flow from -> to
-}
 
 type ToolRegion struct {
 	memSpaceID uint64
@@ -207,7 +174,7 @@ func (tr *ToolRegion) FindToolsByTags(tags []string) ([]*configs.ToolDefinition,
 // ============================================================
 
 // SaveToolDAG persists the tool dependency graph
-func (tr *ToolRegion) SaveToolDAG(dag *ToolDAG) error {
+func (tr *ToolRegion) SaveToolDAG(dag *configs.ToolDAG) error {
 	data, err := json.Marshal(dag)
 	if err != nil {
 		return fmt.Errorf("failed to marshal tool DAG: %w", err)
@@ -220,9 +187,9 @@ func (tr *ToolRegion) SaveToolDAG(dag *ToolDAG) error {
 }
 
 // LoadToolDAG retrieves the tool dependency graph
-func (tr *ToolRegion) LoadToolDAG() (*ToolDAG, error) {
+func (tr *ToolRegion) LoadToolDAG() (*configs.ToolDAG, error) {
 	rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(ToolDAGKey))
-	var dag ToolDAG
+	var dag configs.ToolDAG
 
 	err := tr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
@@ -242,39 +209,39 @@ func (tr *ToolRegion) LoadToolDAG() (*ToolDAG, error) {
 // ============================================================
 
 // RecordToolExec logs a tool execution attempt
-func (tr *ToolRegion) RecordToolExec(agentID uint64, toolName string, input map[string]interface{}) (uint64, error) {
-	tr.mu.Lock()
-	seq := tr.seq
-	tr.seq++
-	err := tr.saveSeq(tr.seq)
-	tr.mu.Unlock()
-
-	if err != nil {
-		return 0, fmt.Errorf("failed to save tool exec seq: %w", err)
-	}
-
-	record := &ToolExecRecord{
-		Seq:       seq,
-		ToolName:  toolName,
-		AgentID:   agentID,
-		Input:     input,
-		Status:    ToolExecRunning,
-		StartedAt: time.Now().Unix(),
-	}
-
-	data, err := json.Marshal(record)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal exec record: %w", err)
-	}
-
-	execKey := fmt.Sprintf("tool/exec/%d/status", seq)
-	rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(execKey))
-
-	err = tr.kvClient.Update(func(txn storage.Transaction) error {
-		return txn.Put(rawKey, data)
-	})
-	return seq, err
-}
+//func (tr *ToolRegion) RecordToolExec(agentID uint64, toolName string, input map[string]interface{}) (uint64, error) {
+//	tr.mu.Lock()
+//	seq := tr.seq
+//	tr.seq++
+//	err := tr.saveSeq(tr.seq)
+//	tr.mu.Unlock()
+//
+//	if err != nil {
+//		return 0, fmt.Errorf("failed to save tool exec seq: %w", err)
+//	}
+//
+//	record := &ToolExecRecord{
+//		Seq:       seq,
+//		ToolName:  toolName,
+//		AgentID:   agentID,
+//		Input:     input,
+//		Status:    ToolExecRunning,
+//		StartedAt: time.Now().Unix(),
+//	}
+//
+//	data, err := json.Marshal(record)
+//	if err != nil {
+//		return 0, fmt.Errorf("failed to marshal exec record: %w", err)
+//	}
+//
+//	execKey := fmt.Sprintf("tool/exec/%d/status", seq)
+//	rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(execKey))
+//
+//	err = tr.kvClient.Update(func(txn storage.Transaction) error {
+//		return txn.Put(rawKey, data)
+//	})
+//	return seq, err
+//}
 
 // CompleteToolExec marks a tool execution as completed with result
 func (tr *ToolRegion) CompleteToolExec(seq uint64, output map[string]interface{}, errMsg string) error {
@@ -282,7 +249,7 @@ func (tr *ToolRegion) CompleteToolExec(seq uint64, output map[string]interface{}
 	rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(execKey))
 
 	// Read existing record
-	var record ToolExecRecord
+	var record configs.ToolExecRecord
 	err := tr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
 		if err != nil {
@@ -298,10 +265,10 @@ func (tr *ToolRegion) CompleteToolExec(seq uint64, output map[string]interface{}
 	record.DoneAt = time.Now().Unix()
 	record.Output = output
 	if errMsg != "" {
-		record.Status = ToolExecFailed
+		record.Status = configs.ToolExecFailed
 		record.Error = errMsg
 	} else {
-		record.Status = ToolExecCompleted
+		record.Status = configs.ToolExecCompleted
 	}
 
 	data, err := json.Marshal(record)
@@ -314,10 +281,11 @@ func (tr *ToolRegion) CompleteToolExec(seq uint64, output map[string]interface{}
 	})
 }
 
-// GetToolExecHistory returns all execution records for a specific tool
-func (tr *ToolRegion) GetToolExecHistory(toolName string) ([]*ToolExecRecord, error) {
+// pkg/runtime/memspace/region/tool_region.go
+
+func (tr *ToolRegion) GetToolExecHistory(toolName string) ([]*configs.ToolExecRecord, error) {
 	prefix := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte("tool/exec/"))
-	var records []*ToolExecRecord
+	var records []*configs.ToolExecRecord
 
 	err := tr.kvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
@@ -325,7 +293,8 @@ func (tr *ToolRegion) GetToolExecHistory(toolName string) ([]*ToolExecRecord, er
 			return err
 		}
 		for _, pair := range kvPairs {
-			var record ToolExecRecord
+			var record configs.ToolExecRecord
+			// Ignore unmarshal errors for non-record keys (e.g., seq keys)
 			if err := json.Unmarshal(pair.Value, &record); err != nil {
 				continue
 			}
@@ -335,7 +304,12 @@ func (tr *ToolRegion) GetToolExecHistory(toolName string) ([]*ToolExecRecord, er
 		}
 		return nil
 	})
-	return records, err
+
+	// Return empty slice instead of error if scan fails
+	if err != nil {
+		return []*configs.ToolExecRecord{}, nil
+	}
+	return records, nil
 }
 
 // ============================================================
@@ -381,6 +355,67 @@ func (tr *ToolRegion) Cleanup() error {
 		for _, pair := range kvPairs {
 			if err := txn.Delete(pair.Key); err != nil {
 				return err
+			}
+		}
+		return nil
+	})
+}
+func (tr *ToolRegion) RecordToolExec(agentID uint64, toolName string, input map[string]interface{}) (uint64, error) {
+	tr.mu.Lock()
+	seq := tr.seq
+	tr.seq++
+	if err := tr.saveSeq(tr.seq); err != nil {
+		tr.mu.Unlock()
+		return 0, fmt.Errorf("failed to save tool exec seq: %w", err)
+	}
+	tr.mu.Unlock()
+
+	record := &configs.ToolExecRecord{
+		Seq:       seq,
+		ToolName:  toolName,
+		AgentID:   agentID,
+		Input:     input,
+		Status:    configs.ToolExecRunning,
+		StartedAt: time.Now().Unix(),
+	}
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal exec record: %w", err)
+	}
+
+	execKey := fmt.Sprintf("tool/exec/%d/status", seq)
+	rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(execKey))
+
+	return seq, tr.kvClient.Update(func(txn storage.Transaction) error {
+		return txn.Put(rawKey, data)
+	})
+}
+
+// RecordToolExecBatch persists multiple tool execution results in a single transaction
+// Useful for recording an entire DAG's results atomically
+func (tr *ToolRegion) RecordToolExecBatch(results map[string]*configs.ToolExecResult) error {
+	return tr.kvClient.Update(func(txn storage.Transaction) error {
+		for toolName, result := range results {
+			// For batch mode, we use toolName as identifier since seq might not be tracked
+			execKey := fmt.Sprintf("tool/exec/batch/%s", toolName)
+			rawKey := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(execKey))
+
+			record := configs.ToolExecRecord{
+				ToolName: toolName,
+				Output:   result.Output,
+				Status:   configs.ToolExecStatus(result.Status),
+				Error:    result.Error,
+				DoneAt:   result.DoneAt,
+			}
+
+			data, err := json.Marshal(record)
+			if err != nil {
+				return fmt.Errorf("failed to marshal record for %s: %w", toolName, err)
+			}
+
+			if err := txn.Put(rawKey, data); err != nil {
+				return fmt.Errorf("failed to write record for %s: %w", toolName, err)
 			}
 		}
 		return nil

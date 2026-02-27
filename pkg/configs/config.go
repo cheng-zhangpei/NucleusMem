@@ -96,3 +96,56 @@ type ToolParam struct {
 	Required bool   `json:"required"`
 	Default  string `json:"default,omitempty"`
 }
+type ToolDAG struct {
+	Nodes []ToolDAGNode `json:"nodes"`
+	Edges []ToolDAGEdge `json:"edges"`
+}
+
+// ToolDAGNode represents a single tool execution unit
+type ToolDAGNode struct {
+	ToolName string                 `json:"tool_name"`
+	Params   map[string]interface{} `json:"params,omitempty"`
+}
+
+// ToolDAGEdge defines dependency between tools
+// If there is an edge from A -> B, B depends on A
+type ToolDAGEdge struct {
+	From   string   `json:"from"`
+	To     string   `json:"to"`
+	Fields []string `json:"fields,omitempty"` // Output fields from 'From' passed to 'To'
+}
+type ToolExecResult struct {
+	ToolName string                 `json:"tool_name"`
+	Output   map[string]interface{} `json:"output,omitempty"`
+	Error    string                 `json:"error,omitempty"`
+	Status   string                 `json:"status"`            // "completed" | "failed"
+	Seq      uint64                 `json:"seq,omitempty"`     // Optional: execution sequence number
+	DoneAt   int64                  `json:"done_at,omitempty"` // Optional: completion timestamp
+}
+
+// ToolExecBatchResult groups multiple tool execution results
+// Used for recording an entire DAG's results atomically
+type ToolExecBatchResult struct {
+	ViewSpaceID string                     `json:"viewspace_id,omitempty"`
+	Results     map[string]*ToolExecResult `json:"results"` // toolName -> result
+	Timestamp   int64                      `json:"timestamp"`
+}
+type ToolExecRecord struct {
+	Seq       uint64                 `json:"seq"`
+	ToolName  string                 `json:"tool_name"`
+	AgentID   uint64                 `json:"agent_id"`
+	Input     map[string]interface{} `json:"input,omitempty"`
+	Output    map[string]interface{} `json:"output,omitempty"`
+	Status    ToolExecStatus         `json:"status"`
+	Error     string                 `json:"error,omitempty"`
+	StartedAt int64                  `json:"started_at,omitempty"`
+	DoneAt    int64                  `json:"done_at,omitempty"`
+}
+type ToolExecStatus string
+
+const (
+	ToolExecPending   ToolExecStatus = "pending"
+	ToolExecRunning   ToolExecStatus = "running"
+	ToolExecCompleted ToolExecStatus = "completed"
+	ToolExecFailed    ToolExecStatus = "failed"
+)

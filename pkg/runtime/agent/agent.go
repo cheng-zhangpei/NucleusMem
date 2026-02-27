@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -377,6 +378,8 @@ func (a *Agent) handleTask(task *AgentTask) error {
 		result, err = a.handleToolTask(task)
 	case TaskTypeDecompose:
 		result, err = a.handleDecomposeTask(task)
+	case TaskTypeToolDAG: // New case
+		result, err = a.handleToolDAGTask(task)
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -1021,4 +1024,157 @@ func (a *Agent) collectAvailableToolNames() []string {
 	}
 
 	return tools
+}
+
+func (a *Agent) handleToolDAGTask(task *AgentTask) (string, error) {
+	log.Infof("Agent %d executing ToolDAG task: %s", a.AgentId, task.ID)
+
+	// ============================================================
+	// 1. Get memspace_id from task.Params (with JSON-safe type conversion)
+	// ============================================================
+	var memspaceID uint64
+
+	// Option A: Direct graph provided in task
+	if task.ToolGraph != nil {
+		// Use provided graph directly
+	} else {
+		// Option B: Load from MemSpace - need memspace_id
+		memspaceIDRaw, ok := task.Params["memspace_id"]
+		if !ok {
+			return "", fmt.Errorf("ToolDAG task missing tool_graph or memspace_id")
+		}
+
+		// 🔥 JSON unmarshaling converts numbers to float64, handle all cases
+		switch v := memspaceIDRaw.(type) {
+		case uint64:
+			memspaceID = v
+		case float64:
+			memspaceID = uint64(v)
+		case int:
+			memspaceID = uint64(v)
+		case int64:
+			memspaceID = uint64(v)
+		case string:
+			// Fallback: parse from string
+			parsed, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return "", fmt.Errorf("memspace_id must be numeric, got string: %s", v)
+			}
+			memspaceID = parsed
+		default:
+			return "", fmt.Errorf("memspace_id has unexpected type %T: %v", memspaceIDRaw, memspaceIDRaw)
+		}
+	}
+
+	// ============================================================
+	// 2. Load ToolDAG from MemSpace (if not provided directly)
+	// ============================================================
+	var dag *configs.ToolDAG
+	var err error
+
+	if task.ToolGraph != nil {
+		dag = task.ToolGraph
+	} else if memspaceID > 0 {
+		msClient, ok := a.GetMemSpaceClient(memspaceID)
+		if !ok {
+			return "", fmt.Errorf("memspace %d not bound to agent %d", memspaceID, a.AgentId)
+		}
+		dag, err = msClient.LoadToolDAG()
+		if err != nil {
+			return "", fmt.Errorf("failed to load ToolDAG from memspace %d: %w", memspaceID, err)
+		}
+	}
+
+	if dag == nil || len(dag.Nodes) == 0 {
+		return "", fmt.Errorf("ToolDAG is empty or not found")
+	}
+
+	log.Infof("Agent %d loaded ToolDAG: %d nodes, %d edges", a.AgentId, len(dag.Nodes), len(dag.Edges))
+
+	// ============================================================
+	// 3. Execute tools with topological scheduling
+	// ============================================================
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	executor := NewToolDAGExecutor(a, dag, memspaceID, task.ID)
+	results, err := executor.Execute(ctx)
+	if err != nil {
+		return "", fmt.Errorf("ToolDAG execution failed: %w", err)
+	}
+
+	// ============================================================
+	// 4. Record audit to MemSpace (async, non-blocking)
+	// ============================================================
+	if memspaceID > 0 && len(results) > 0 {
+		go func() {
+			msClient, ok := a.GetMemSpaceClient(memspaceID)
+			if !ok {
+				return
+			}
+			// Use batch recording for efficiency
+			_ = msClient.RecordToolExecBatch(results)
+		}()
+	}
+
+	// ============================================================
+	// 5. Return aggregated results as JSON string
+	// ============================================================
+	resultJSON, err := json.Marshal(results)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal results: %w", err)
+	}
+
+	log.Infof("Agent %d ToolDAG task %s completed: %d tools executed",
+		a.AgentId, task.ID, len(results))
+	// In handleToolDAGTask, after executor.Execute():
+	if memspaceID > 0 && len(results) > 0 {
+		msClient, ok := a.GetMemSpaceClient(memspaceID)
+		if ok {
+			// For testing: respect TEST_SYNC_AUDIT env var
+			if os.Getenv("TEST_SYNC_AUDIT") == "1" {
+				// Sync mode for tests
+				_ = msClient.RecordToolExecBatch(results)
+			} else {
+				// Async mode for production
+				go func() {
+					_ = msClient.RecordToolExecBatch(results)
+				}()
+			}
+		}
+	}
+	return string(resultJSON), nil
+}
+
+// loadToolDAGFromMemSpace loads the tool dependency graph from MemSpace
+func (a *Agent) loadToolDAGFromMemSpace(memSpaceID uint64) (*configs.ToolDAG, error) {
+	msClient, ok := a.GetMemSpaceClient(memSpaceID)
+	if !ok {
+		return nil, fmt.Errorf("memspace %d not bound", memSpaceID)
+	}
+
+	// Call MemSpace HTTP API to load DAG
+	// Note: Ensure MemSpaceClient has this method (see next section)
+	return msClient.LoadToolDAG()
+}
+
+// recordToolExecToMemSpace records tool execution result for auditing
+func (a *Agent) recordToolExecToMemSpace(memSpaceID uint64, result *configs.ToolExecResult) {
+	msClient, ok := a.GetMemSpaceClient(memSpaceID)
+	if !ok {
+		return
+	}
+
+	go func() {
+		msClient.RecordToolExec(result.ToolName, result.Output, result.Error)
+	}()
+}
+
+// getToolDefinition retrieves tool definition from MemSpace
+func (a *Agent) getToolDefinition(toolName string, memSpaceID uint64) (*configs.ToolDefinition, error) {
+	msClient, ok := a.GetMemSpaceClient(memSpaceID)
+	if !ok {
+		return nil, fmt.Errorf("memspace %d not bound", memSpaceID)
+	}
+	return msClient.GetTool(toolName)
 }
