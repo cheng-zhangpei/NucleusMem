@@ -6,6 +6,7 @@ import (
 	"NucleusMem/pkg/api"
 	"NucleusMem/pkg/configs"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pingcap-incubator/tinykv/log"
@@ -16,39 +17,60 @@ type SpawnResult struct {
 	Dataflow []DataflowEdge `json:"dataflow"`
 }
 
+// pkg/viewspace/grow.go
+
 type SpawnChild struct {
 	Name        string   `json:"name"`
 	Type        string   `json:"type"`
 	Tags        []string `json:"tags"`
 	Description string   `json:"description"`
-	Role        string   `json:"role"`
+	Role        string   `json:"role"` // RepresentedAgent 角色
 	Tools       []string `json:"tools,omitempty"`
+
+	// 新增：ViewSpace 内部协作声明
+	Workers []WorkerSpec `json:"workers,omitempty"`
+
+	// 新增：额外 MemSpace 需求
+	MountMemSpaces []MemSpaceMount `json:"mount_memspaces,omitempty"`
+}
+
+// WorkerSpec declares a worker agent needed within a ViewSpace
+type WorkerSpec struct {
+	Role        string `json:"role"`
+	Description string `json:"description"`
+}
+
+// MemSpaceMount declares an additional MemSpace to mount
+type MemSpaceMount struct {
+	Source   string `json:"source"`    // "parent" | "new" | "tag:<tag_name>"
+	Purpose  string `json:"purpose"`   // 说明用途
+	ReadOnly bool   `json:"read_only"` // 是否只读
 }
 
 // Grow makes a node's agent decompose its task, creates children,
 // then recursively grows process children.
 // Only global and process nodes can grow. Each node grows only once.
+// pkg/viewspace/grow.go
+
 func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
-	// Guard: atomic cannot grow
 	if node.Type == "atomic" {
-		log.Infof("[Grow] '%s' is atomic, skip", node.Name)
+		t.Growth.Record("grow", node.Name, "Atomic node, no growth needed", t)
 		return nil
 	}
 
-	// Guard: only grow once
 	node.mu.Lock()
 	if node.hasGrown {
 		node.mu.Unlock()
-		log.Warnf("[Grow] '%s' already grown, skip", node.Name)
 		return nil
 	}
 	node.hasGrown = true
 	node.Status = NodeStatusGrowing
 	node.mu.Unlock()
 
-	log.Infof("[Grow] '%s' (agent:%d) decomposing...", node.Name, node.AgentID)
+	// Step 1: Decompose
+	t.Growth.Record("decompose", node.Name,
+		fmt.Sprintf("Asking agent:%d to decompose task...", node.AgentID), t)
 
-	// Step 1: Submit decompose task to the agent via HTTP
 	submitReq := &api.SubmitTaskRequest{
 		Type:           "decompose",
 		Content:        node.Description,
@@ -59,51 +81,68 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 	submitResp, err := node.AgentClient.SubmitTask(submitReq)
 	if err != nil {
 		node.Status = NodeStatusFailed
+		t.Growth.Record("failed", node.Name,
+			fmt.Sprintf("Submit failed: %v", err), t)
 		return fmt.Errorf("submit to '%s': %w", node.Name, err)
 	}
 
-	log.Infof("[Grow] '%s' task=%s, waiting...", node.Name, submitResp.TaskID)
-
-	// Step 2: Wait for agent to finish (LLM call happens inside agent)
 	resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 120*time.Second)
 	if err != nil {
 		node.Status = NodeStatusFailed
+		t.Growth.Record("failed", node.Name,
+			fmt.Sprintf("Wait timeout: %v", err), t)
 		return fmt.Errorf("wait for '%s': %w", node.Name, err)
 	}
 
 	if resultResp.ErrorMessage != "" {
 		node.Status = NodeStatusFailed
+		t.Growth.Record("failed", node.Name,
+			fmt.Sprintf("Decompose error: %s", resultResp.ErrorMessage), t)
 		return fmt.Errorf("decompose '%s' failed: %s", node.Name, resultResp.ErrorMessage)
 	}
 
-	// Step 3: Parse agent's output into SpawnResult
+	// Step 2: Parse
 	spawnResult, err := parseAgentDecomposeResult(resultResp.Result)
 	if err != nil {
 		node.Status = NodeStatusFailed
+		t.Growth.Record("failed", node.Name,
+			fmt.Sprintf("Parse failed: %v", err), t)
 		return fmt.Errorf("parse '%s': %w", node.Name, err)
 	}
 
-	log.Infof("[Grow] '%s' → %d children, %d dataflow",
-		node.Name, len(spawnResult.Children), len(spawnResult.Dataflow))
+	t.Growth.Record("decompose", node.Name,
+		fmt.Sprintf("Decomposed into %d children, %d dataflows",
+			len(spawnResult.Children), len(spawnResult.Dataflow)), t)
 
-	// Step 4: Create child nodes
+	// Step 3: Spawn children
 	for _, childDef := range spawnResult.Children {
 		child := &ViewSpaceNode{
-			Name:        childDef.Name,
-			Type:        childDef.Type,
-			Tags:        childDef.Tags,
-			Description: childDef.Description,
-			Role:        childDef.Role,
-			Tools:       childDef.Tools,
-			Parent:      node,
-			Children:    make([]*ViewSpaceNode, 0),
-			Status:      NodeStatusPending,
-			tree:        t,
+			Name:           childDef.Name,
+			Type:           childDef.Type,
+			Tags:           childDef.Tags,
+			Description:    childDef.Description,
+			Role:           childDef.Role,
+			Tools:          childDef.Tools,
+			Parent:         node,
+			Children:       make([]*ViewSpaceNode, 0),
+			Status:         NodeStatusPending,
+			tree:           t,
+			workersSpecs:   childDef.Workers,
+			memSpaceMounts: childDef.MountMemSpaces,
 		}
 
-		// Bring child to life (create memspace, agent, bind, client)
+		t.Growth.Record("spawn", child.Name,
+			fmt.Sprintf("Spawning [%s] under '%s' (role: %s)",
+				child.Type, node.Name, child.Role), t)
+
+		// Inject default parent mount
+		t.injectDefaultMounts(child)
+
+		// Bring to life
 		if err := t.bringToLife(child); err != nil {
 			node.Status = NodeStatusFailed
+			t.Growth.Record("failed", child.Name,
+				fmt.Sprintf("bringToLife failed: %v", err), t)
 			return fmt.Errorf("create child '%s' under '%s': %w", child.Name, node.Name, err)
 		}
 
@@ -115,7 +154,8 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 		node.mu.Lock()
 		node.Children = append(node.Children, child)
 		node.mu.Unlock()
-		// Inject the tool Info into memspace
+
+		// Inject ToolDAG for atomic nodes
 		if child.Type == "atomic" && len(childDef.Tools) > 0 {
 			dag := &configs.ToolDAG{
 				Nodes: make([]configs.ToolDAGNode, len(childDef.Tools)),
@@ -124,37 +164,50 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 			for i, toolName := range childDef.Tools {
 				dag.Nodes[i] = configs.ToolDAGNode{ToolName: toolName}
 			}
-
-			if child.MemSpaceID > 0 && child.MemSpaceClient != nil {
+			if child.MemSpaceClient != nil {
 				if err := child.MemSpaceClient.SaveToolDAG(dag); err != nil {
 					log.Warnf("[Grow] Failed to save ToolDAG for %s: %v", child.Name, err)
-				} else {
-					log.Infof("[Grow] Injected ToolDAG into %s (memspace: %d)",
-						child.Name, child.MemSpaceID)
 				}
 			}
 		}
-		log.Infof("[Grow] '%s' spawned [%s] '%s' (agent:%d, ms:%d)",
-			node.Name, child.Type, child.Name, child.AgentID, child.MemSpaceID)
+
+		t.Growth.Record("ready", child.Name,
+			fmt.Sprintf("[%s] alive → agent:%d, ms:%d, workers:%d, mounts:%d",
+				child.Type, child.AgentID, child.MemSpaceID,
+				len(child.Workers), len(child.MountedMemSpaces)), t)
 	}
 
-	// Step 5: Store dataflow edges between children
+	// Step 4: Store dataflow
 	node.mu.Lock()
 	node.ChildDataflow = spawnResult.Dataflow
 	node.Status = NodeStatusReady
 	node.mu.Unlock()
 
-	// Step 6: Recursively grow process children
-	// The child's Description was already set by the parent's decomposition,
-	// so when the child's agent decomposes, it sees the sub-task assigned by parent.
+	if len(spawnResult.Dataflow) > 0 {
+		dfDesc := make([]string, 0, len(spawnResult.Dataflow))
+		for _, df := range spawnResult.Dataflow {
+			dfDesc = append(dfDesc, fmt.Sprintf("%s→%s", df.From, df.To))
+		}
+		t.Growth.Record("grow", node.Name,
+			fmt.Sprintf("Dataflow: %s", strings.Join(dfDesc, ", ")), t)
+	}
+
+	// Step 5: Recurse into process children
 	for _, child := range node.Children {
 		if child.Type == "process" {
-			log.Infof("[Grow] Recursing into process '%s'...", child.Name)
+			t.Growth.Record("grow", child.Name,
+				"Recursing into process node...", t)
 			if err := t.Grow(child); err != nil {
 				return fmt.Errorf("recursive grow '%s': %w", child.Name, err)
 			}
 		}
 	}
-	log.Infof("[Grow] '%s' complete: %d children", node.Name, len(node.Children))
+
+	t.Growth.Record("ready", node.Name,
+		fmt.Sprintf("Growth complete: %d children", len(node.Children)), t)
+	// when the recursive process finished, print the struct of the tree
+	if node.Parent == nil {
+		t.PrintSnapshot()
+	}
 	return nil
 }

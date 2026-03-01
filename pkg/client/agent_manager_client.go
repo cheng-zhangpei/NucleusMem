@@ -171,3 +171,6 @@ func (c *AgentManagerClient) SendStatusUpdateWithContext(ctx context.Context, up
 func isHTTPURL(url string) bool {
 	return len(url) > 7 && (url[:7] == "http://" || url[:8] == "https://")
 }
+func (c *AgentManagerClient) GetBaseURL() string {
+	return c.baseURL
+}

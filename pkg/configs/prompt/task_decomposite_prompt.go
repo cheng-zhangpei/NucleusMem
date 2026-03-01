@@ -27,20 +27,40 @@ func NewTaskDecomposePrompt(userRequest string, availableTools, availableAgents,
 
 ## What is a ViewSpace Tree
 A ViewSpace Tree is a hierarchical structure where:
-- Each node is a "ViewSpace" representing a sub-task
+- Each node is a "ViewSpace" — a collaboration space with its own shared memory (blackboard)
 - There are 3 types of ViewSpace:
-  - "global": The root node. Coordinates everything and collects final results. There is exactly ONE global node.
-  - "process": Intermediate coordination nodes. They decompose tasks further and aggregate results from children.
+  - "global": The root node. Coordinates everything and collects final results. Exactly ONE.
+  - "process": Intermediate coordination nodes. Decompose tasks further and aggregate children results.
   - "atomic": Leaf nodes that do actual work by calling tools.
-- For simple tasks that only need 1-2 tools, keep the structure minimal:
-  just one global + one or two atomic nodes. Do NOT over-decompose.
+
+## Collaboration Within a ViewSpace
+Each ViewSpace has:
+- A **Represented Agent** (coordinator): defined by the "role" field
+- Optional **Worker Agents**: additional agents that collaborate within the same ViewSpace via shared memory
+- A **Primary MemSpace** (created automatically): the shared blackboard for all agents in this ViewSpace
+- Optional **Mounted MemSpaces**: additional memory spaces for context inheritance or data sharing
+
+### When to use Workers
+Use workers when a task benefits from multiple perspectives working on the SAME shared context:
+- A coder + reviewer iterating on code
+- A researcher + fact-checker verifying claims  
+- A planner + validator cross-checking a plan
+
+Do NOT use workers when sub-tasks are independent — use tree decomposition (children) instead.
+
+### When to mount additional MemSpaces
+- "parent": Mount the parent ViewSpace's memory for context inheritance (auto-injected, usually don't need to specify)
+- "new": Create a fresh isolated workspace for a specific purpose
+- "tag:<name>": Connect to an existing shared knowledge base
+- "id:<memspace_id>": Connect to an existing MemSpace by its numeric ID
+- "name:<memspace_name>": Connect to an existing MemSpace by its name
 ## Output Format
-You MUST respond with a single valid JSON object containing exactly 3 sections:
+Respond with a single valid JSON object:
 
 {
   "meta": {
-    "task_id": "a short kebab-case id for this task",
-    "description": "one-line summary of the overall task"
+    "task_id": "kebab-case-id",
+    "description": "one-line summary"
   },
   "viewspaces": [
     {
@@ -48,8 +68,15 @@ You MUST respond with a single valid JSON object containing exactly 3 sections:
       "type": "global | process | atomic",
       "tags": ["relevant", "tags"],
       "description": "what this viewspace does",
-      "role": "the agent role needed for this viewspace",
-      "tools": ["tool1", "tool2"]  // only for atomic nodes, omit for others
+      "role": "the coordinator agent role",
+      "tools": ["tool1"],
+      "workers": [
+        {"role": "Reviewer", "description": "Reviews output and provides feedback"}
+      ],
+      "mount_memspaces": [
+        {"source": "parent", "purpose": "access parent context", "read_only": true},
+        {"source": "new", "purpose": "scratch workspace for drafts", "read_only": false}
+      ]
     }
   ],
   "dependencies": {
@@ -57,24 +84,22 @@ You MUST respond with a single valid JSON object containing exactly 3 sections:
       {"parent": "parent-name", "children": ["child1", "child2"]}
     ],
     "dataflow": [
-      {"from": "source-name", "to": "target-name", "fields": ["field1"], "description": "what data flows"}
+      {"from": "source", "to": "target", "fields": ["field1"], "description": "data flow"}
     ]
   }
 }
 
 ## Rules
-1. There must be exactly ONE node with type "global"
-2. "atomic" nodes CANNOT have children in the tree
-3. "global" and "process" nodes MUST have at least one child
-4. All names must be unique across the entire tree
-5. dataflow "from" and "to" must reference existing viewspace names
-6. dataflow cannot have circular dependencies
-7. Only "atomic" nodes should have "tools" field
-8. Keep decomposition practical - don't over-split simple tasks
-9. An atomic node should be created when:
-   - The task can be done by calling one or a few tools
-   - The task requires only a single agent role
-   - No further sub-task coordination is needed
+1. Exactly ONE "global" node
+2. "atomic" nodes CANNOT have children
+3. "global" and "process" MUST have at least one child
+4. All names must be unique
+5. No circular dataflow dependencies
+6. Only "atomic" nodes have "tools"
+7. "workers" are optional — use them for iterative collaboration within a single space
+8. "mount_memspaces" are optional — parent context is auto-inherited
+9. Keep decomposition practical — don't over-split simple tasks
+10. For simple tasks (1-2 tools): just global + 1-2 atomic nodes, no workers needed
 
 ## Available Resources
 `
@@ -85,11 +110,11 @@ You MUST respond with a single valid JSON object containing exactly 3 sections:
 			system += fmt.Sprintf("- %s\n", t)
 		}
 	} else {
-		system += "\nAvailable Tools: none specified (you may assume general-purpose tools)\n"
+		system += "\nAvailable Tools: none specified (assume general-purpose tools)\n"
 	}
 
 	if len(availableMemTags) > 0 {
-		system += "\nAvailable MemSpace Tags (use these in your tags for matching):\n"
+		system += "\nAvailable MemSpace Tags (for tag-based mounting):\n"
 		for _, t := range availableMemTags {
 			system += fmt.Sprintf("- %s\n", t)
 		}
@@ -97,7 +122,7 @@ You MUST respond with a single valid JSON object containing exactly 3 sections:
 
 	return &TaskDecomposePrompt{
 		Type:             "task_decompose",
-		Version:          "v1",
+		Version:          "v2",
 		Timestamp:        time.Now().Unix(),
 		System:           system,
 		UserRequest:      userRequest,

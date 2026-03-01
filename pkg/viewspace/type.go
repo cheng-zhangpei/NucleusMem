@@ -28,12 +28,14 @@ type Meta struct {
 }
 
 type ViewSpaceDef struct {
-	Name        string   `json:"name"`
-	Type        string   `json:"type"` // "global" | "process" | "atomic"
-	Tags        []string `json:"tags"`
-	Description string   `json:"description"`
-	Role        string   `json:"role"`
-	Tools       []string `json:"tools,omitempty"` // only for atomic
+	Name           string          `json:"name"`
+	Type           string          `json:"type"`
+	Tags           []string        `json:"tags"`
+	Description    string          `json:"description"`
+	Role           string          `json:"role"`
+	Tools          []string        `json:"tools,omitempty"`
+	Workers        []WorkerSpec    `json:"workers,omitempty"`
+	MountMemSpaces []MemSpaceMount `json:"mount_memspaces,omitempty"`
 }
 
 type Dependencies struct {

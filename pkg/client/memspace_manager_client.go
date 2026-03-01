@@ -187,3 +187,9 @@ func (c *MemSpaceClient) SaveToolDAG(dag *configs.ToolDAG) error {
 	}
 	return nil
 }
+
+// pkg/client/memspace_manager_client.go
+
+func (c *MemSpaceManagerClient) GetBaseURL() string {
+	return c.baseURL
+}

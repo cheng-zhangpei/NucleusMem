@@ -7,6 +7,7 @@ import (
 	"NucleusMem/pkg/client"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ type ViewSpaceTree struct {
 
 	// Config for launching resources
 	LaunchConfig *TreeLaunchConfig
+	Growth       *GrowthLog
 }
 
 // TreeLaunchConfig holds the config needed to launch agents and memspaces
@@ -57,37 +59,65 @@ func (c *TreeLaunchConfig) AllocPort() int {
 	return port
 }
 
+// pkg/viewspace/tree.go
+
 type ViewSpaceNode struct {
 	Name        string
-	Type        string
+	Type        string // "global" | "process" | "atomic"
 	Tags        []string
 	Description string
-	Role        string
+	Role        string // RepresentedAgent 的角色
 	Tools       []string
 
-	Parent   *ViewSpaceNode
-	Children []*ViewSpaceNode
-	mu       sync.RWMutex
-
+	// === 树形结构 ===
+	Parent        *ViewSpaceNode
+	Children      []*ViewSpaceNode
 	ChildDataflow []DataflowEdge
 
-	MemSpaceID   uint64
-	MemSpaceAddr string
-	AgentID      uint64
-	AgentAddr    string
-	AgentClient  *client.AgentClient
+	// === 主资源（必须）===
+	// RepresentedAgent: 这个 ViewSpace 的协调者
+	AgentID     uint64
+	AgentAddr   string
+	AgentClient *client.AgentClient
+	// 主 MemSpace: 这个 ViewSpace 的黑板
+	MemSpaceID     uint64
+	MemSpaceAddr   string
+	MemSpaceClient *client.MemSpaceClient
 
-	Status         NodeStatus
-	hasGrown       bool
-	tree           *ViewSpaceTree
-	MemSpaceClient *client.MemSpaceClient `json:"-"`
+	// === 协作资源（可选）===
+	// Worker Agents: 在这个 ViewSpace 内协作的其他 Agent
+	Workers        []*WorkerBinding
+	workersSpecs   []WorkerSpec
+	memSpaceMounts []MemSpaceMount
+	// Mounted MemSpaces: 额外挂载的 MemSpace（继承父级上下文、共享知识库等）
+	MountedMemSpaces []*MountedMemSpace
 
-	RepresentedAgentID uint64   `json:"represented_agent_id"`
-	WorkerAgentIDs     []uint64 `json:"worker_agent_ids,omitempty"`
-	SharedMemSpaceIDs  []uint64 `json:"shared_memspace_ids,omitempty"`
+	// === 状态 ===
+	Status   NodeStatus
+	hasGrown bool
+	mu       sync.RWMutex
+	tree     *ViewSpaceTree
 }
 
-// Run is the entry point
+// WorkerBinding represents a worker agent within a ViewSpace
+type WorkerBinding struct {
+	AgentID   uint64
+	Role      string
+	AgentAddr string
+	Client    *client.AgentClient
+}
+
+// MountedMemSpace represents an additional MemSpace mounted to a ViewSpace
+type MountedMemSpace struct {
+	MemSpaceID uint64
+	Addr       string
+	MountType  string // "inherited" | "shared" | "readonly"
+	Source     string // 来源说明，如 "parent:global-root" 或 "tag:code-repo"
+	Client     *client.MemSpaceClient
+}
+
+// pkg/viewspace/tree.go
+
 func Run(
 	taskDescription string,
 	availableTools []string,
@@ -113,32 +143,62 @@ func Run(
 		MemSpaceMgrClient: client.NewMemSpaceManagerClient(memSpaceMgrAddr),
 		AvailableTools:    availableTools,
 		LaunchConfig:      launchConfig,
+		Growth:            &GrowthLog{},
 	}
 
-	log.Infof("=== ViewSpaceTree Run ===")
-	log.Infof("Task: %s", taskDescription)
-	log.Infof("Tools: %v", availableTools)
+	log.Infof("╔══════════════════════════════════════════════════════════╗")
+	log.Infof("║           🌳 ViewSpaceTree Starting                    ║")
+	log.Infof("║  Task: %-48s║", truncate(taskDescription, 48))
+	log.Infof("║  Tools: %-47s║", truncate(fmt.Sprintf("%v", availableTools), 47))
+	log.Infof("╚══════════════════════════════════════════════════════════╝")
 
 	// Phase 1: Seed
+	tree.Growth.Record("seed", "global-root",
+		fmt.Sprintf("Planting seed: %s", truncate(taskDescription, 60)), tree)
+
 	root, err := tree.seed(taskDescription)
 	if err != nil {
+		tree.Growth.Record("failed", "global-root",
+			fmt.Sprintf("Seed failed: %v", err), tree)
 		return nil, fmt.Errorf("seed failed: %w", err)
 	}
 	tree.Root = root
 
+	tree.Growth.Record("ready", root.Name,
+		fmt.Sprintf("Root alive → agent:%d@%s, ms:%d@%s",
+			root.AgentID, root.AgentAddr, root.MemSpaceID, root.MemSpaceAddr), tree)
+
 	// Phase 2: Grow recursively
-	if err := tree.grow(root); err != nil {
+	tree.Growth.Record("grow", root.Name,
+		"Beginning recursive growth from root...", tree)
+
+	if err := tree.Grow(root); err != nil {
+		tree.Growth.Record("failed", root.Name,
+			fmt.Sprintf("Growth failed: %v", err), tree)
 		return nil, fmt.Errorf("grow failed: %w", err)
 	}
 
-	// Summary
+	// Final summary
 	g, p, a := tree.GetNodeCount()
-	log.Infof("=== Tree Complete: %d global, %d process, %d atomic ===", g, p, a)
+	log.Infof("\n")
+	log.Infof("╔══════════════════════════════════════════════════════════╗")
+	log.Infof("║           🌳 Tree Growth Complete                      ║")
+	log.Infof("║  Global: %-3d  Process: %-3d  Atomic: %-3d               ║", g, p, a)
+	log.Infof("╚══════════════════════════════════════════════════════════╝")
 	log.Infof("\n%s", tree.PrintTree())
+
+	// Print timeline
+	tree.Growth.PrintGrowthSummary()
 
 	return tree, nil
 }
 
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
 func (t *ViewSpaceTree) seed(taskDescription string) (*ViewSpaceNode, error) {
 	log.Infof("[Seed] Creating Global ViewSpace...")
 
@@ -166,186 +226,310 @@ func (t *ViewSpaceTree) seed(taskDescription string) (*ViewSpaceNode, error) {
 
 	return node, nil
 }
-
 func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
-	cfg := t.LaunchConfig
-
-	// 1. Allocate a port for the memspace
-	msPort := cfg.AllocPort()
-	msAddr := fmt.Sprintf("127.0.0.1:%d", msPort)
-
-	// Generate a unique memspace ID based on timestamp
-	msID := uint64(time.Now().UnixNano() % 1000000)
-
-	// Launch MemSpace
-	msReq := &api.LaunchMemSpaceRequestManager{
-		MemSpaceID:          msID,
-		Name:                fmt.Sprintf("ms-%s", node.Name),
-		Type:                "public",
-		Description:         fmt.Sprintf("MemSpace for ViewSpace '%s'", node.Name),
-		HttpAddr:            msAddr,
-		PdAddr:              cfg.PdAddr,
-		EmbeddingClientAddr: cfg.EmbeddingAddr,
-		LightModelAddr:      cfg.LightModelAddr,
-		BinPath:             cfg.MemSpaceBinPath,
-		ConfigFilePath:      cfg.MemSpaceConfigPath,
-	}
-
-	if err := t.MemSpaceMgrClient.LaunchMemSpace(msReq); err != nil {
-		return fmt.Errorf("launch memspace for '%s': %w", node.Name, err)
+	// ============ Phase 1: Primary MemSpace ============
+	msID, msAddr, err := t.launchMemSpaceWithRetry(
+		node,
+		fmt.Sprintf("ms-%s", node.Name),
+		"public",
+		fmt.Sprintf("Primary blackboard for '%s'", node.Name),
+	)
+	if err != nil {
+		return fmt.Errorf("[bringToLife] '%s': %w", node.Name, err)
 	}
 
 	node.MemSpaceID = msID
 	node.MemSpaceAddr = msAddr
+	node.MemSpaceClient = client.NewMemSpaceClient(msAddr)
 
-	// 2. Allocate a port for the agent
-	agentPort := cfg.AllocPort()
-	agentAddr := fmt.Sprintf("127.0.0.1:%d", agentPort)
+	t.Growth.Record("bringToLife", node.Name,
+		fmt.Sprintf("MemSpace launched → %d@%s", msID, msAddr), t)
 
-	// Generate agent ID
-	agentID := uint64(time.Now().UnixNano() % 1000000)
-
-	// Launch Agent
-	agentReq := &api.LaunchAgentRequestHTTP{
-		AgentID:        agentID,
-		Role:           node.Role,
-		BinPath:        cfg.AgentBinPath,
-		HttpAddr:       agentAddr,
-		ConfigFilePath: cfg.AgentConfigPath,
-		IsJob:          false,
-	}
-
-	agentResp, err := t.AgentMgrClient.LaunchAgent(agentReq)
+	// ============ Phase 2: Represented Agent ============
+	agentID, agentAddr, err := t.launchAgentWithRetry(node.Role)
 	if err != nil {
-		return fmt.Errorf("launch agent for '%s': %w", node.Name, err)
+		return fmt.Errorf("[bringToLife] '%s': %w", node.Name, err)
 	}
 
-	node.AgentID = agentResp.AgentID
+	node.AgentID = agentID
 	node.AgentAddr = agentAddr
-	if agentResp.HttpAddr != "" {
-		node.AgentAddr = agentResp.HttpAddr
+	node.AgentClient = client.NewAgentClient(agentAddr)
+
+	t.Growth.Record("bringToLife", node.Name,
+		fmt.Sprintf("Agent launched → %d@%s (role: %s)", agentID, agentAddr, node.Role), t)
+
+	// ============ Phase 3: Bind Agent ↔ MemSpace ============
+	if err := t.bindAgentToMemSpace(
+		node.AgentID, node.AgentAddr, node.Role,
+		node.MemSpaceID, node.MemSpaceAddr, "public",
+	); err != nil {
+		return fmt.Errorf("[bringToLife] '%s': bind: %w", node.Name, err)
 	}
 
-	// 3. Bind
-	if err := t.MemSpaceMgrClient.BindMemSpace(node.AgentID, node.MemSpaceID, node.AgentAddr, node.Role); err != nil {
-		return fmt.Errorf("bind for '%s': %w", node.Name, err)
-	}
-	// 4. Create client
-	node.AgentClient = client.NewAgentClient(node.AgentAddr)
+	t.Growth.Record("bringToLife", node.Name,
+		fmt.Sprintf("Bound agent %d ↔ memspace %d", node.AgentID, node.MemSpaceID), t)
 
+	// ============ Phase 4: Workers ============
+	if node.Workers == nil {
+		node.Workers = make([]*WorkerBinding, 0)
+	}
+
+	for _, spec := range node.workersSpecs {
+		wID, wAddr, err := t.launchAgentWithRetry(spec.Role)
+		if err != nil {
+			t.Growth.Record("worker", node.Name,
+				fmt.Sprintf("⚠ Worker '%s' launch failed: %v (non-fatal)", spec.Role, err), t)
+			continue
+		}
+
+		if err := t.bindAgentToMemSpace(
+			wID, wAddr, spec.Role,
+			node.MemSpaceID, node.MemSpaceAddr, "public",
+		); err != nil {
+			t.Growth.Record("worker", node.Name,
+				fmt.Sprintf("⚠ Worker '%s' bind failed: %v (non-fatal)", spec.Role, err), t)
+			continue
+		}
+
+		node.Workers = append(node.Workers, &WorkerBinding{
+			AgentID:   wID,
+			Role:      spec.Role,
+			AgentAddr: wAddr,
+			Client:    client.NewAgentClient(wAddr),
+		})
+
+		t.Growth.Record("worker", node.Name,
+			fmt.Sprintf("Worker '%s' → %d@%s", spec.Role, wID, wAddr), t)
+	}
+
+	// ============ Phase 5: Mount Additional MemSpaces ============
+	if node.MountedMemSpaces == nil {
+		node.MountedMemSpaces = make([]*MountedMemSpace, 0)
+	}
+
+	for _, mount := range node.memSpaceMounts {
+		mounted, err := t.resolveAndMountMemSpace(node, mount)
+		if err != nil {
+			t.Growth.Record("mount", node.Name,
+				fmt.Sprintf("⚠ Mount failed (source=%s): %v (non-fatal)", mount.Source, err), t)
+			continue
+		}
+		node.MountedMemSpaces = append(node.MountedMemSpaces, mounted)
+		t.bindAllAgentsToMountedMemSpace(node, mounted)
+
+		t.Growth.Record("mount", node.Name,
+			fmt.Sprintf("Mounted %d@%s (source=%s)", mounted.MemSpaceID, mounted.Addr, mounted.Source), t)
+	}
+
+	// ============ Phase 6: Done ============
 	node.Status = NodeStatusReady
 	return nil
 }
 
-func (t *ViewSpaceTree) grow(node *ViewSpaceNode) error {
-	// Guard: atomic cannot grow(exist condition)
-	if node.Type == "atomic" {
-		log.Infof("[Grow] '%s' is atomic, skip", node.Name)
-		return nil
-	}
+// bindAgentToMemSpace does point-to-point binding with exponential backoff retry.
+// Retry is needed because MemSpace/Agent processes are launched asynchronously
+// and may not be ready when binding is attempted.
+func (t *ViewSpaceTree) bindAgentToMemSpace(
+	agentID uint64, agentAddr string, role string,
+	memSpaceID uint64, memSpaceAddr string, msType string,
+) error {
+	maxRetry := 5
+	baseDelay := 1 * time.Second // 1s, 2s, 4s, 8s, 16s
 
-	// Guard: only grow once
-	node.mu.Lock()
-	if node.hasGrown {
-		node.mu.Unlock()
-		log.Warnf("[Grow] '%s' already grown, skip", node.Name)
-		return nil
-	}
-	node.hasGrown = true
-	node.Status = NodeStatusGrowing
-	node.mu.Unlock()
+	var lastErr error
 
-	log.Infof("[Grow] '%s' (agent:%d) decomposing...", node.Name, node.AgentID)
-
-	// Step 1: Submit decompose task
-	submitReq := &api.SubmitTaskRequest{
-		Type:           "decompose",
-		Content:        node.Description,
-		AvailableTools: t.AvailableTools,
-		MaxRetry:       3,
-	}
-
-	submitResp, err := node.AgentClient.SubmitTask(submitReq)
-	if err != nil {
-		node.Status = NodeStatusFailed
-		return fmt.Errorf("submit to '%s': %w", node.Name, err)
-	}
-
-	log.Infof("[Grow] '%s' task=%s, waiting...", node.Name, submitResp.TaskID)
-
-	// Step 2: Wait for result
-	resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 120*time.Second)
-	if err != nil {
-		node.Status = NodeStatusFailed
-		return fmt.Errorf("wait for '%s': %w", node.Name, err)
-	}
-
-	if resultResp.ErrorMessage != "" {
-		node.Status = NodeStatusFailed
-		return fmt.Errorf("decompose '%s' failed: %s", node.Name, resultResp.ErrorMessage)
-	}
-
-	// Step 3: Parse
-	spawnResult, err := parseAgentDecomposeResult(resultResp.Result)
-	if err != nil {
-		node.Status = NodeStatusFailed
-		return fmt.Errorf("parse '%s': %w", node.Name, err)
-	}
-
-	log.Infof("[Grow] '%s' → %d children, %d dataflow",
-		node.Name, len(spawnResult.Children), len(spawnResult.Dataflow))
-
-	// Step 4: Create children
-	for _, childDef := range spawnResult.Children {
-		child := &ViewSpaceNode{
-			Name:        childDef.Name,
-			Type:        childDef.Type,
-			Tags:        childDef.Tags,
-			Description: childDef.Description,
-			Role:        childDef.Role,
-			Tools:       childDef.Tools,
-			Parent:      node,
-			Children:    make([]*ViewSpaceNode, 0),
-			Status:      NodeStatusPending,
-			tree:        t,
+	for attempt := 1; attempt <= maxRetry; attempt++ {
+		// Step 1: Tell Agent to bind
+		agentClient := client.NewAgentClient(agentAddr)
+		bindReq := &api.BindMemSpaceRequest{
+			MemSpaceID: strconv.FormatUint(memSpaceID, 10),
+			AgentID:    agentID,
+			Type:       msType,
+			HttpAddr:   memSpaceAddr,
 		}
 
-		if err := t.bringToLife(child); err != nil {
-			node.Status = NodeStatusFailed
-			return fmt.Errorf("create '%s': %w", child.Name, err)
+		err := agentClient.BindMemSpace(bindReq)
+		if err == nil {
+			// Step 2: Tell MemSpace to register agent (CommRegion)
+			msClient := client.NewMemSpaceClient(memSpaceAddr)
+			if regErr := msClient.RegisterAgent(agentID, agentAddr, role); regErr != nil {
+				log.Warnf("[bind] register agent %d in memspace %d comm region failed: %v (non-fatal)",
+					agentID, memSpaceID, regErr)
+			}
+
+			if attempt > 1 {
+				log.Infof("[bind] agent %d → memspace %d succeeded on attempt %d",
+					agentID, memSpaceID, attempt)
+			}
+			return nil
 		}
 
-		t.mu.Lock()
-		t.Nodes[child.Name] = child
-		t.mu.Unlock()
+		lastErr = err
+		delay := baseDelay * time.Duration(1<<(attempt-1)) // 1s, 2s, 4s, 8s, 16s
 
-		node.mu.Lock()
-		node.Children = append(node.Children, child)
-		node.mu.Unlock()
+		log.Warnf("[bind] agent %d → memspace %d attempt %d/%d failed: %v (retry in %s)",
+			agentID, memSpaceID, attempt, maxRetry, err, delay)
 
-		log.Infof("[Grow] '%s' → [%s] '%s' (agent:%d, ms:%d)",
-			node.Name, child.Type, child.Name, child.AgentID, child.MemSpaceID)
+		time.Sleep(delay)
 	}
 
-	// Step 5: Store dataflow
-	node.mu.Lock()
-	// todo(cheng) update the message in the memspace of this viewSpace
-	node.ChildDataflow = spawnResult.Dataflow
-	node.Status = NodeStatusReady
-	node.mu.Unlock()
+	return fmt.Errorf("agent %d bind to memspace %d failed after %d attempts: %w",
+		agentID, memSpaceID, maxRetry, lastErr)
+}
 
-	// Step 6: Recursive grow for process children
-	for _, child := range node.Children {
-		if child.Type == "process" {
-			log.Infof("[Grow] Recursing into process '%s'...", child.Name)
-			if err := t.grow(child); err != nil {
-				return err
+// bindAllAgentsToMountedMemSpace binds represented agent + all workers to a mounted memspace
+func (t *ViewSpaceTree) bindAllAgentsToMountedMemSpace(node *ViewSpaceNode, mounted *MountedMemSpace) {
+	msType := "public"
+	if mounted.MountType == "readonly" {
+		msType = "public" // readonly is enforced at application level, not storage level
+	}
+
+	// Bind represented agent
+	if err := t.bindAgentToMemSpace(
+		node.AgentID, node.AgentAddr, node.Role,
+		mounted.MemSpaceID, mounted.Addr, msType,
+	); err != nil {
+		log.Warnf("[bringToLife] bind agent %d to mounted memspace %d: %v",
+			node.AgentID, mounted.MemSpaceID, err)
+	}
+
+	// Bind all workers
+	for _, w := range node.Workers {
+		if err := t.bindAgentToMemSpace(
+			w.AgentID, w.AgentAddr, w.Role,
+			mounted.MemSpaceID, mounted.Addr, msType,
+		); err != nil {
+			log.Warnf("[bringToLife] bind worker %d to mounted memspace %d: %v",
+				w.AgentID, mounted.MemSpaceID, err)
+		}
+	}
+}
+
+// resolveAndMountMemSpace 解析 MemSpace 来源并建立连接。
+func (t *ViewSpaceTree) resolveAndMountMemSpace(node *ViewSpaceNode, mount MemSpaceMount) (*MountedMemSpace, error) {
+	switch {
+	case mount.Source == "parent":
+		// Inherit parent's primary MemSpace
+		if node.Parent == nil {
+			return nil, fmt.Errorf("cannot mount 'parent': node has no parent")
+		}
+		mountType := "inherited"
+		if mount.ReadOnly {
+			mountType = "readonly"
+		}
+		return &MountedMemSpace{
+			MemSpaceID: node.Parent.MemSpaceID,
+			Addr:       node.Parent.MemSpaceAddr,
+			MountType:  mountType,
+			Source:     fmt.Sprintf("parent:%s", node.Parent.Name),
+			Client:     client.NewMemSpaceClient(node.Parent.MemSpaceAddr),
+		}, nil
+	case mount.Source == "new":
+		msID, msAddr, err := t.launchMemSpaceWithRetry(
+			node,
+			fmt.Sprintf("ms-%s-aux", node.Name),
+			"public",
+			fmt.Sprintf("Auxiliary memspace for '%s': %s", node.Name, mount.Purpose),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("launch new memspace: %w", err)
+		}
+
+		mountType := "shared"
+		if mount.ReadOnly {
+			mountType = "readonly"
+		}
+
+		return &MountedMemSpace{
+			MemSpaceID: msID,
+			Addr:       msAddr,
+			MountType:  mountType,
+			Source:     "new",
+			Client:     client.NewMemSpaceClient(msAddr),
+		}, nil
+
+	case len(mount.Source) > 3 && mount.Source[:3] == "id:":
+		// Mount existing MemSpace by ID, e.g. "id:12345"
+		idStr := mount.Source[3:]
+		targetID, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memspace id '%s': %w", idStr, err)
+		}
+
+		memspaces, err := t.MemSpaceMgrClient.ListMemSpaces()
+		if err != nil {
+			return nil, fmt.Errorf("list memspaces for id lookup: %w", err)
+		}
+
+		for _, ms := range memspaces {
+			msID, _ := strconv.ParseUint(ms.MemSpaceID, 10, 64)
+			if msID == targetID {
+				mountType := "shared"
+				if mount.ReadOnly {
+					mountType = "readonly"
+				}
+				return &MountedMemSpace{
+					MemSpaceID: msID,
+					Addr:       ms.HttpAddr,
+					MountType:  mountType,
+					Source:     mount.Source,
+					Client:     client.NewMemSpaceClient(ms.HttpAddr),
+				}, nil
 			}
 		}
+		return nil, fmt.Errorf("memspace with id %d not found", targetID)
+
+	case len(mount.Source) > 5 && mount.Source[:5] == "name:":
+		// Mount existing MemSpace by name, e.g. "name:shared-knowledge"
+		targetName := mount.Source[5:]
+
+		memspaces, err := t.MemSpaceMgrClient.ListMemSpaces()
+		if err != nil {
+			return nil, fmt.Errorf("list memspaces for name lookup: %w", err)
+		}
+
+		for _, ms := range memspaces {
+			if ms.Name == targetName {
+				msID, _ := strconv.ParseUint(ms.MemSpaceID, 10, 64)
+				mountType := "shared"
+				if mount.ReadOnly {
+					mountType = "readonly"
+				}
+				return &MountedMemSpace{
+					MemSpaceID: msID,
+					Addr:       ms.HttpAddr,
+					MountType:  mountType,
+					Source:     mount.Source,
+					Client:     client.NewMemSpaceClient(ms.HttpAddr),
+				}, nil
+			}
+		}
+		return nil, fmt.Errorf("memspace with name '%s' not found", targetName)
+
+	default:
+		return nil, fmt.Errorf("unknown mount source: '%s' (valid: 'parent', 'new', 'id:<num>', 'name:<str>')", mount.Source)
+	}
+}
+
+// bindAllAgentsToMemSpace binds the represented agent and all workers to a memspace
+func (t *ViewSpaceTree) bindAllAgentsToMemSpace(node *ViewSpaceNode, mounted *MountedMemSpace) {
+	// Bind represented agent
+	if err := t.MemSpaceMgrClient.BindMemSpace(
+		node.AgentID, mounted.MemSpaceID, node.AgentAddr, node.Role,
+	); err != nil {
+		log.Warnf("[bringToLife] failed to bind agent %d to mounted memspace %d: %v",
+			node.AgentID, mounted.MemSpaceID, err)
 	}
 
-	log.Infof("[Grow] '%s' complete: %d children", node.Name, len(node.Children))
-	return nil
+	// Bind all workers
+	for _, w := range node.Workers {
+		if err := t.MemSpaceMgrClient.BindMemSpace(
+			w.AgentID, mounted.MemSpaceID, w.AgentAddr, w.Role,
+		); err != nil {
+			log.Warnf("[bringToLife] failed to bind worker %d to mounted memspace %d: %v",
+				w.AgentID, mounted.MemSpaceID, err)
+		}
+	}
 }
 
 func parseAgentDecomposeResult(resultJSON string) (*SpawnResult, error) {
@@ -386,19 +570,6 @@ func (t *ViewSpaceTree) Shutdown() {
 	}
 	log.Infof("=== Shutdown ===")
 	t.shutdownNode(t.Root)
-}
-
-func (t *ViewSpaceTree) shutdownNode(node *ViewSpaceNode) {
-	for _, child := range node.Children {
-		t.shutdownNode(child)
-	}
-	if node.AgentID != 0 {
-		t.AgentMgrClient.StopAgent(node.AgentID)
-	}
-	if node.MemSpaceID != 0 {
-		t.MemSpaceMgrClient.ShutdownMemSpace(node.MemSpaceID)
-	}
-	log.Infof("[Shutdown] '%s' destroyed", node.Name)
 }
 
 func (t *ViewSpaceTree) PrintTree() string {
@@ -476,4 +647,153 @@ func (t *ViewSpaceTree) GetNodeCount() (global, process, atomic int) {
 		}
 	}
 	return
+}
+func (t *ViewSpaceTree) shutdownNode(node *ViewSpaceNode) {
+	// 先递归关闭子节点
+	for _, child := range node.Children {
+		t.shutdownNode(child)
+	}
+
+	// 关闭 Worker Agents
+	for _, w := range node.Workers {
+		if w.AgentID != 0 {
+			t.AgentMgrClient.StopAgent(w.AgentID)
+			log.Infof("[Shutdown] '%s' worker %d destroyed", node.Name, w.AgentID)
+		}
+	}
+
+	// 关闭 Represented Agent
+	if node.AgentID != 0 {
+		t.AgentMgrClient.StopAgent(node.AgentID)
+	}
+
+	// 关闭额外创建的 MemSpace（不关闭 inherited/tag 的，因为它们属于别人）
+	for _, m := range node.MountedMemSpaces {
+		if m.MountType == "shared" && m.Source == "new" {
+			t.MemSpaceMgrClient.ShutdownMemSpace(m.MemSpaceID)
+			log.Infof("[Shutdown] '%s' aux memspace %d destroyed", node.Name, m.MemSpaceID)
+		}
+	}
+
+	// 关闭主 MemSpace
+	if node.MemSpaceID != 0 {
+		t.MemSpaceMgrClient.ShutdownMemSpace(node.MemSpaceID)
+	}
+
+	log.Infof("[Shutdown] '%s' destroyed", node.Name)
+}
+
+// injectDefaultMounts ensures every child node has access to parent context
+// This is a system-level policy: children always inherit parent's MemSpace (read-only)
+func (t *ViewSpaceTree) injectDefaultMounts(child *ViewSpaceNode) {
+	if child.Parent == nil {
+		return
+	}
+
+	// Check if parent mount already declared by LLM
+	for _, m := range child.memSpaceMounts {
+		if m.Source == "parent" {
+			return // already has it, don't duplicate
+		}
+	}
+
+	// Auto-inject read-only parent mount
+	child.memSpaceMounts = append(child.memSpaceMounts, MemSpaceMount{
+		Source:   "parent",
+		Purpose:  "Inherit parent context and task description",
+		ReadOnly: true,
+	})
+}
+
+const (
+	maxLaunchRetry = 5
+)
+
+// launchMemSpaceWithRetry attempts to launch a MemSpace, retrying with new ports on failure
+func (t *ViewSpaceTree) launchMemSpaceWithRetry(node *ViewSpaceNode, name, msType, description string) (uint64, string, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxLaunchRetry; attempt++ {
+		cfg := t.LaunchConfig
+		msPort := cfg.AllocPort()
+		msAddr := fmt.Sprintf("localhost:%d", msPort)
+		msID := uint64(time.Now().UnixNano() % 1000000)
+
+		msConfigPath, err := GenerateMemSpaceConfig(
+			msID, name, msType, description,
+			msAddr, cfg.PdAddr, cfg.EmbeddingAddr, cfg.LightModelAddr,
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("generate config: %w", err)
+			continue
+		}
+
+		msReq := &api.LaunchMemSpaceRequestManager{
+			BinPath:        cfg.MemSpaceBinPath,
+			ConfigFilePath: msConfigPath,
+		}
+
+		if err := t.MemSpaceMgrClient.LaunchMemSpace(msReq); err != nil {
+			lastErr = err
+			log.Warnf("[launch] MemSpace '%s' attempt %d/%d failed on port %d: %v",
+				name, attempt, maxLaunchRetry, msPort, err)
+			continue
+		}
+
+		log.Infof("[launch] MemSpace '%s' launched → %d@%s (attempt %d)",
+			name, msID, msAddr, attempt)
+		return msID, msAddr, nil
+	}
+
+	return 0, "", fmt.Errorf("launch memspace '%s' failed after %d attempts: %w",
+		name, maxLaunchRetry, lastErr)
+}
+
+// launchAgentWithRetry attempts to launch an Agent, retrying with new ports on failure
+func (t *ViewSpaceTree) launchAgentWithRetry(role string) (uint64, string, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxLaunchRetry; attempt++ {
+		cfg := t.LaunchConfig
+		agentPort := cfg.AllocPort()
+		agentAddr := fmt.Sprintf("localhost:%d", agentPort)
+		agentID := uint64(time.Now().UnixNano() % 1000000)
+
+		agentConfigPath, err := GenerateAgentConfig(
+			agentID, role, agentAddr,
+			cfg.LightModelAddr, cfg.EmbeddingAddr,
+			t.MemSpaceMgrClient.GetBaseURL(),
+			t.AgentMgrClient.GetBaseURL(),
+			false,
+		)
+		if err != nil {
+			lastErr = fmt.Errorf("generate config: %w", err)
+			continue
+		}
+
+		agentReq := &api.LaunchAgentRequestHTTP{
+			BinPath:        cfg.AgentBinPath,
+			ConfigFilePath: agentConfigPath,
+		}
+
+		agentResp, err := t.AgentMgrClient.LaunchAgent(agentReq)
+		if err != nil {
+			lastErr = err
+			log.Warnf("[launch] Agent '%s' attempt %d/%d failed on port %d: %v",
+				role, attempt, maxLaunchRetry, agentPort, err)
+			continue
+		}
+
+		actualAddr := agentAddr
+		if agentResp.HttpAddr != "" {
+			actualAddr = agentResp.HttpAddr
+		}
+
+		log.Infof("[launch] Agent '%s' launched → %d@%s (attempt %d)",
+			role, agentResp.AgentID, actualAddr, attempt)
+		return agentResp.AgentID, actualAddr, nil
+	}
+
+	return 0, "", fmt.Errorf("launch agent '%s' failed after %d attempts: %w",
+		role, maxLaunchRetry, lastErr)
 }

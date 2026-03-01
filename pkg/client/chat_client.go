@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -16,10 +17,13 @@ type ChatServerClient struct {
 
 // NewChatServerClient 创建新的聊天服务器客户端
 func NewChatServerClient(serverAddr string) *ChatServerClient {
+	if !strings.HasPrefix(serverAddr, "http://") && !strings.HasPrefix(serverAddr, "https://") {
+		serverAddr = "http://" + serverAddr
+	}
 	return &ChatServerClient{
 		httpServerAddr: serverAddr,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 300 * time.Second,
 		},
 	}
 }

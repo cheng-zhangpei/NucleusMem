@@ -543,6 +543,15 @@ func (a *Agent) handleChatTask(task *AgentTask) (string, error) {
 		Role:    "assistant",
 		Content: response,
 	})
+	memoryContent := fmt.Sprintf("Q: %s\nA: %s", content, response)
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		if err := msClient.WriteMemory(memoryContent, a.AgentId); err != nil {
+			log.Warnf("Agent %d failed to write memory: %v", a.AgentId, err)
+		}
+	}
 	a.mu.Unlock()
 	log.Infof("Agent %d processed chat task → %s", a.AgentId, response)
 	return response, nil
@@ -624,11 +633,14 @@ func (a *Agent) handleCommTask(task *AgentTask) (string, error) {
 
 // bindingMemSpace binds the agent to a MemSpace via MemSpaceManager
 func (a *Agent) bindingMemSpace(memSpaceConfig *configs.MemSpaceConfig) error {
+	log.Info("[agent] get the binding request from the server")
 	if memSpaceConfig == nil {
+		log.Fatal("[agent] get the binding request from the server is nil")
 		return fmt.Errorf("memspace config is nil")
 	}
 	// 验证 Manager 客户端是否存在
 	if a.memSpaceManagerClient == nil {
+		log.Fatal("memspace manager client not initialized")
 		return fmt.Errorf("memspace manager client not initialized")
 	}
 	// 获取 Agent 自身的 HTTP 地址（从 config 或默认）
@@ -643,6 +655,7 @@ func (a *Agent) bindingMemSpace(memSpaceConfig *configs.MemSpaceConfig) error {
 		agentRole,
 	)
 	if err != nil {
+		log.Infof("failed to bind memspace via manager: %w", err)
 		return fmt.Errorf("failed to bind memspace via manager: %w", err)
 	}
 	log.Infof("[Agent %d] Successfully bound to MemSpace %d via Manager", a.AgentId, memSpaceConfig.MemSpaceID)
@@ -870,7 +883,6 @@ func (a *Agent) invokeTool(tool *configs.ToolDefinition, params map[string]inter
 
 	return resp.Data, nil
 }
-
 func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 	if task.Content == "" {
 		return "", fmt.Errorf("decompose task requires content (the task description)")
@@ -881,13 +893,11 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 		maxRetry = 3
 	}
 
-	// Collect available tools from bound MemSpaces
 	availableTools := task.AvailableTools
 	if len(availableTools) == 0 {
 		availableTools = a.collectAvailableToolNames()
 	}
 
-	// Build decomposition prompt
 	p := prompt.NewTaskDecomposePrompt(
 		task.Content,
 		availableTools,
@@ -895,37 +905,25 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 		task.AvailableMemTags,
 	)
 
-	// Convert prompt to ChatMessage slice for ChatCompletion
 	msgs := p.BuildMessages()
-	chatMessages := make([]client.ChatMessage, 0, len(msgs))
+
+	// 累积式对话历史：system + user 初始消息 + 后续的 assistant 回复和 user 纠错
+	conversation := make([]client.ChatMessage, 0, len(msgs)+10)
 	for _, m := range msgs {
-		chatMessages = append(chatMessages, client.ChatMessage{
+		conversation = append(conversation, client.ChatMessage{
 			Role:    m["role"],
 			Content: m["content"],
 		})
 	}
 
-	var lastErrors string
 	var definition *viewspace.TaskDefinition
+	var lastErrors string
 
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		log.Infof("Agent %d decompose attempt %d/%d", a.AgentId, attempt, maxRetry)
 
-		// Build messages for this attempt
-		currentMessages := make([]client.ChatMessage, len(chatMessages))
-		copy(currentMessages, chatMessages)
-
-		// Append error feedback from previous attempt
-		if lastErrors != "" {
-			currentMessages = append(currentMessages, client.ChatMessage{
-				Role:    "user",
-				Content: lastErrors,
-			})
-		}
-
-		// Call LLM using existing ChatCompletion
 		req := client.ChatCompletionRequest{
-			Messages:    currentMessages,
+			Messages:    conversation,
 			Temperature: 0.3,
 			MaxTokens:   4096,
 		}
@@ -933,26 +931,36 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 		resp, err := a.chatClient.ChatCompletion(req)
 		if err != nil {
 			log.Warnf("Agent %d LLM call failed on attempt %d: %v", a.AgentId, attempt, err)
-			lastErrors = fmt.Sprintf("LLM call failed: %v. Please try again.", err)
+			lastErrors = fmt.Sprintf("LLM call failed: %v", err)
 			continue
 		}
 
 		if len(resp.Choices) == 0 {
-			lastErrors = "LLM returned no response. Please try again."
+			lastErrors = "LLM returned no response."
 			continue
 		}
 
 		response := resp.Choices[0].Message.Content
 
-		// Extract JSON from response
+		conversation = append(conversation, client.ChatMessage{
+			Role:    "assistant",
+			Content: response,
+		})
+
+		// Extract JSON
 		jsonStr := viewspace.ExtractJSON(response)
 		if jsonStr == "" {
 			lastErrors = "Your response did not contain valid JSON. Please output ONLY a JSON object with meta, viewspaces, and dependencies."
 			log.Warnf("Agent %d attempt %d: no JSON found in response", a.AgentId, attempt)
+
+			conversation = append(conversation, client.ChatMessage{
+				Role:    "user",
+				Content: lastErrors,
+			})
 			continue
 		}
 
-		// Parse and check
+		// Parse and validate
 		result := viewspace.Parse([]byte(jsonStr))
 
 		if result.HasErrors() {
@@ -961,9 +969,15 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 			for _, e := range result.Errors {
 				log.Warnf("  %s", e.Error())
 			}
+
+			conversation = append(conversation, client.ChatMessage{
+				Role:    "user",
+				Content: lastErrors,
+			})
 			continue
 		}
 
+		// Warnings
 		for _, w := range result.Warnings {
 			log.Warnf("Agent %d decompose warning: %s", a.AgentId, w)
 		}
@@ -978,13 +992,11 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 		return "", fmt.Errorf("task decomposition failed after %d attempts, last errors: %s", maxRetry, lastErrors)
 	}
 
-	// Serialize result
 	resultJSON, err := json.MarshalIndent(definition, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize task definition: %w", err)
 	}
 
-	// Store parsed definition for downstream use
 	a.taskResultsMu.Lock()
 	if taskResult, exists := a.taskResults[task.ID]; exists {
 		taskResult.TaskDefinition = definition

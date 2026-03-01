@@ -26,6 +26,7 @@ type MemSpaceType string
 const (
 	MemSpaceTypePrivate MemSpaceType = "private"
 	MemSpaceTypePublic  MemSpaceType = "public"
+	//MemSpaceTypeInherited MemSpaceType = "Inherited"
 )
 
 type MemSpace struct {

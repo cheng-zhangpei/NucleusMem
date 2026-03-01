@@ -3,6 +3,7 @@ package viewspace
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 )
 
 // ============================================================
@@ -52,6 +53,8 @@ func Parse(raw []byte) *ParseResult {
 		checkDataflowAcyclic,
 		checkAtomicHasTools,
 		checkProcessNoTools,
+		validateWorkerRules,
+		validateMountRules,
 	}
 
 	for _, check := range checkers {
@@ -324,7 +327,7 @@ func checkWarnings(def *TaskDefinition) []string {
 	var warnings []string
 
 	// Tree depth check
-	depth := calcMaxDepth(def)
+	depth := calcMaxDepth(def.Dependencies.Tree)
 	if depth > 4 {
 		warnings = append(warnings, fmt.Sprintf("S2: tree depth is %d, consider simplifying (>4 may cause latency)", depth))
 	}
@@ -339,35 +342,62 @@ func checkWarnings(def *TaskDefinition) []string {
 	return warnings
 }
 
-func calcMaxDepth(def *TaskDefinition) int {
-	children := map[string][]string{}
-	for _, edge := range def.Dependencies.Tree {
-		children[edge.Parent] = append(children[edge.Parent], edge.Children...)
+// calcMaxDepth need 防环检测
+func calcMaxDepth(tree []TreeEdge) int {
+	// Build parent -> children map
+	childrenMap := make(map[string][]string)
+	for _, edge := range tree {
+		childrenMap[edge.Parent] = append(childrenMap[edge.Parent], edge.Children...)
 	}
 
-	globalName := ""
-	for _, vs := range def.ViewSpaces {
-		if vs.Type == "global" {
-			globalName = vs.Name
+	// Find root (appears as parent but never as child)
+	allChildren := make(map[string]bool)
+	allParents := make(map[string]bool)
+	for _, edge := range tree {
+		allParents[edge.Parent] = true
+		for _, c := range edge.Children {
+			allChildren[c] = true
+		}
+	}
+
+	var root string
+	for p := range allParents {
+		if !allChildren[p] {
+			root = p
 			break
 		}
 	}
-	if globalName == "" {
+
+	if root == "" {
 		return 0
 	}
 
-	var dfs func(string) int
-	dfs = func(node string) int {
+	// DFS with visited set to prevent infinite recursion
+	var dfs func(node string, visited map[string]bool) int
+	dfs = func(node string, visited map[string]bool) int {
+		// Cycle detection
+		if visited[node] {
+			return 0
+		}
+		visited[node] = true
+
 		maxChild := 0
-		for _, child := range children[node] {
-			d := dfs(child)
+		for _, child := range childrenMap[node] {
+			// Pass a copy of visited for each branch
+			childVisited := make(map[string]bool)
+			for k, v := range visited {
+				childVisited[k] = v
+			}
+			d := dfs(child, childVisited)
 			if d > maxChild {
 				maxChild = d
 			}
 		}
+
 		return maxChild + 1
 	}
-	return dfs(globalName)
+
+	return dfs(root, make(map[string]bool))
 }
 func ExtractJSON(response string) string {
 	// Try direct parse first
@@ -428,4 +458,70 @@ func ExtractJSON(response string) string {
 	}
 
 	return ""
+}
+func validateWorkerRules(def *TaskDefinition) *CheckError {
+	var errs []error
+
+	for _, vs := range def.ViewSpaces {
+		if vs.Type == "global" && len(vs.Workers) > 0 {
+			errs = append(errs, fmt.Errorf(
+				"[WORKER-1] node '%s': global viewspace should not have workers", vs.Name))
+		}
+	}
+	if errs != nil {
+		return &CheckError{
+			Rule:    "WORKER",
+			Node:    "",
+			Message: errs[0].Error(),
+		}
+	}
+	return nil
+}
+
+// MOUNT-1: mount source must be valid
+func validateMountRules(def *TaskDefinition) *CheckError {
+	var errs []error
+	for _, vs := range def.ViewSpaces {
+		for _, m := range vs.MountMemSpaces {
+			valid := false
+			switch {
+			case m.Source == "parent":
+				valid = true
+			case m.Source == "new":
+				valid = true
+			case len(m.Source) > 3 && m.Source[:3] == "id:":
+				// check that the part after "id:" is a valid number
+				_, err := strconv.ParseUint(m.Source[3:], 10, 64)
+				valid = err == nil
+				if !valid {
+					errs = append(errs, fmt.Errorf(
+						"[MOUNT-1] node '%s': mount source '%s' has invalid id (must be numeric)",
+						vs.Name, m.Source))
+					continue
+				}
+			case len(m.Source) > 5 && m.Source[:5] == "name:":
+				// name must be non-empty
+				valid = len(m.Source) > 5
+				if !valid {
+					errs = append(errs, fmt.Errorf(
+						"[MOUNT-1] node '%s': mount source 'name:' requires a non-empty name",
+						vs.Name))
+					continue
+				}
+			}
+			if !valid {
+				errs = append(errs, fmt.Errorf(
+					"[MOUNT-1] node '%s': invalid mount source '%s' (must be 'parent', 'new', 'id:<num>', or 'name:<str>')",
+					vs.Name, m.Source))
+			}
+		}
+	}
+	if errs != nil {
+		return &CheckError{
+			Rule:    "WORKER",
+			Node:    "",
+			Message: errs[0].Error(),
+		}
+	}
+	return nil
 }

@@ -103,7 +103,7 @@ def chat_completion():
         messages = data['messages']
         stream = data.get('stream', False)
         temperature = min(data.get('temperature', 0.7), 1.0)
-        max_tokens = min(data.get('max_tokens', 512), 2048)
+        max_tokens = min(data.get('max_tokens', 4096), 8192)
 
         logger.info(f"→ Calling Qwen ({MODEL_NAME}) with {len(messages)} messages")
 
@@ -112,7 +112,8 @@ def chat_completion():
             messages=messages,
             stream=stream,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            timeout=300,
         )
 
         if stream:
@@ -197,4 +198,5 @@ if __name__ == '__main__':
     logger.info("Starting Qwen Chat Server with Replay Tolerance (max 10)")
     logger.info(f"   Model: {MODEL_NAME}")
     logger.info(f"   Base URL: {BASE_URL}")
+    app.config['TIMEOUT'] = 300
     app.run(host='0.0.0.0', port=20001, threaded=True)

@@ -430,7 +430,23 @@ ViewSpace = Represented Agent (coordinator)
           + MemSpace (shared blackboard)
           + Input/Output Contract
 ```
+#### ViewSpace Internal Collaboration
 
+A ViewSpace is not merely a task wrapper—it is a **collaboration space**. The distinction between tree-level and ViewSpace-level collaboration is fundamental:
+
+| Collaboration Level | Pattern | Example |
+|---|---|---|
+| **Between ViewSpaces** (tree) | Task decomposition + dataflow | "Analysis group" passes results to "Report group" |
+| **Within a ViewSpace** (blackboard) | Shared MemSpace + Watcher | A Coder writes code, a Reviewer reviews it, both share the same MemSpace |
+
+**The tree resolves *What* (task decomposition), while the ViewSpace interior resolves *How* (iterative collaboration).**
+
+**Workers** are optional agents that collaborate with the Represented Agent within the same ViewSpace. They share the primary MemSpace and communicate via the Blackboard pattern. Workers are appropriate when a task benefits from multiple perspectives operating on the same shared context (e.g., a coder + reviewer iterating on code).
+
+**Mounted MemSpaces** allow a ViewSpace to access additional memory beyond its primary blackboard. This supports:
+- `parent`: Read-only access to the parent ViewSpace's memory for context inheritance (auto-injected by default)
+- `new`: A fresh isolated workspace for scratch computation
+- `id:<num>` / `name:<str>`: Reference to an existing MemSpace by ID or name
 This is analogous to a self-contained "room" where a group of agents collaborate on a bounded sub-problem. All communication within a ViewSpace happens through its dedicated MemSpace, following the blackboard pattern described in §1.2.2. No direct message passing between agents is required.
 
 **The ViewSpace Tree**
@@ -516,55 +532,23 @@ Meta is the meta data of the task
 ```json
 {
   "viewspaces": [
-    // Global ViewSpace
     {
-      "name": "root",
-      "type": "global",
-      "tags": ["code-review", "management"],
-      "description": "Global Coordination: Receive results from all subtasks and generate the final report.",
-      "represented_agent": {
-        "AgentID":xxx
-        "role": "Technical Director",
-      },
-    },
-    // Process ViewSpace
-    {
-      "name": "analysis-group",
-      "type": "process",
-      "tags": ["code-review", "analysis", "coordination"],
-      "description": "Coordinate all analytical subtasks, isolate analytical domain permissions, and consolidate analytical results.",
-      "represented_agent": {
-        "role": "Head of the Analysis Team"
-      },
-      "worker_agents": [
-        {"AgentID": xxx, "role": "Analysis"},
+      "name": "unique-kebab-case-name",
+      "type": "global | process | atomic",
+      "tags": ["relevant", "tags"],
+      "description": "what this viewspace does",
+      "role": "the coordinator agent role",
+      "tools": ["tool1", "tool2"],
+      "workers": [
+        {"role": "Reviewer", "description": "Reviews output and provides feedback"}
       ],
-      "memspace_selector": {
-        "match_tags": ["static-analysis", "code-tools"],
-        "prefer_tags": ["high-performance"]
-      },
-    },
-    // Atomic ViewSpace
-    {
-      "name": "static-analysis",
-      "type": "atomic",
-      "tags": ["code-review", "lint", "metrics"],
-      "description": "Run static analysis tools to collect code complexity metrics and identify violations of coding standards.",
-      "represented_agent": {
-        "AgentID":xxx
-        "role": "Static Analysis Engineer"
-      },
-      "worker_agents": [
-        {"AgentID": xxx, "role": "Analysis"},
-      ],
-      "tools": {
-        "required": ["lint", "complexity_analyzer"],
-      },
-      "memspace_selector": {
-        "match_tags": ["static-analysis", "code-tools"],
-        "prefer_tags": ["high-performance"]
-      },
-    },
+      "mount_memspaces": [
+        {"source": "parent", "purpose": "access parent context", "read_only": true},
+        {"source": "new", "purpose": "scratch workspace for drafts", "read_only": false},
+        {"source": "id:12345", "purpose": "shared knowledge base", "read_only": true},
+        {"source": "name:knowledge-base", "purpose": "reference data", "read_only": true}
+      ]
+    }
   ]
 }
 ```
@@ -617,7 +601,8 @@ Hard rules must be satisfied for the TaskDefinition to be considered valid. Viol
 | **H8** | Reference Existence | All nodes referenced in dependencies must be defined. | A `parent`, `child`, `from`, or `to` field references an undefined name. |
 | **TOOL-1** | Atomic Tools | Atomic nodes represent tool execution and must specify tools. | An `atomic` node has an empty or missing `tools` list. |
 | **TOOL-2** | Coordination Tools | Coordination nodes (`global`, `process`) do not execute tools directly. | A `global` or `process` node contains a `tools` list. |
-
+| **WORKER-1** | Global Workers | Global nodes are pure coordinators and should not have workers. | A `global` node has a non-empty `workers` list. |
+| **MOUNT-1** | Valid Mount Source | Mount sources must follow the defined format. | A mount source is not `parent`, `new`, `id:<num>`, or `name:<str>`. |
 - Soft Rules
 
 Soft rules are heuristic checks designed to optimize task structure for performance and maintainability. Violations generate warnings but do not block execution.
@@ -705,49 +690,56 @@ Atomic nodes represent leaf tasks that invoke external tools. The current implem
 | **Concurrent (ToolDAG)** | ToolDAG found in MemSpace                         | Submit `tool_dag` task to Agent; Agent performs topological scheduling |
 
 The ToolDAG mode delegates concurrency to the Agent layer, which loads the DAG from MemSpace and executes tools with dependency-aware parallelism (see §2.4.1).
+##### 2.5.3.3 Node Lifecycle: The `bringToLife` (Updated)
 
-##### 2.5.3.3 Node Lifecycle: The `bringToLife`
-
-The `bringToLife` function (`pkg/viewspace/grow.go`) embodies the principle that **a logical task node must be "born" into a physical execution environment before it can do work**.
+The `bringToLife` function transforms a logical ViewSpace node into a physical execution environment. It operates in **6 phases**:
 
 ```go
 func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
-    // 1. Launch MemSpace (persistent state + blackboard)
-    // 2. Launch Agent (stateless compute + LLM interface)
-    // 3. Bind Agent ↔ MemSpace via Manager
-    // 4. Create direct HTTP clients for low-latency communication
-    // 5. Mark node as Ready
+    // Phase 1: Launch primary MemSpace (with port retry)
+    // Phase 2: Launch Represented Agent (with port retry)
+    // Phase 3: Bind Agent ↔ MemSpace (with exponential backoff)
+    // Phase 4: Launch Worker Agents (non-fatal on failure)
+    // Phase 5: Mount additional MemSpaces (non-fatal on failure)
+    // Phase 6: Mark node as Ready
 }
 ```
 
-- Design Rationale
+###### Resilience Mechanisms
 
-| Step                 | Purpose                                                      | Why It Matters                                               |
-| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| **Launch MemSpace**  | Provides persistent memory, tool registry, and communication blackboard | Enables state inheritance, auditability, and multi-agent collaboration |
-| **Launch Agent**     | Provides LLM reasoning, task parsing, and tool invocation    | Separates compute from storage; agents remain stateless and replaceable |
-| **Bind via Manager** | Establishes routing metadata in the cluster                  | Allows dynamic discovery without hard-coded addresses        |
-| **Direct Clients**   | Node holds `*MemSpaceClient` and `*AgentClient`              | Avoids Manager proxy overhead for frequent operations        |
+| Mechanism | Applied To | Strategy |
+|-----------|-----------|----------|
+| **Port Retry** | MemSpace & Agent launch | If a port is occupied, offset by +10 and retry (max 3 attempts) |
+| **Exponential Backoff** | Agent ↔ MemSpace binding | Retry with delays of 1s, 2s, 4s, 8s, 16s (max 5 attempts). Required because MemSpace processes are launched asynchronously and may not be ready immediately. |
+| **Non-Fatal Failures** | Workers & Mounted MemSpaces | Worker launch or mount failures are logged as warnings but do not block node initialization. The node proceeds with available resources. |
 
-- Semantic Fields for Collaboration
+###### Point-to-Point Binding
 
-To support complex collaboration patterns, `ViewSpaceNode` includes optional semantic fields:
+Unlike traditional approaches that route binding through a central Manager, NucleusMem performs **direct point-to-point binding** to minimize call chain length:
 
-```go
-type ViewSpaceNode struct {
-    // ... identity and topology fields ...
-    
-    // Collaboration context
-    RepresentedAgentID uint64   `json:"represented_agent_id"`   // Primary coordinator
-    WorkerAgentIDs     []uint64 `json:"worker_agent_ids,omitempty"`  // Contributing agents
-    SharedMemSpaceIDs  []uint64 `json:"shared_memspace_ids,omitempty"` // Inherited/shared memory spaces
-}
+1. **Tell Agent**: Create a local `MemSpaceClient` for the target MemSpace
+2. **Tell MemSpace**: Register the Agent in the `CommRegion` address table
+
+This avoids the overhead of a three-component interaction (`Agent → Manager → MemSpace`) and reduces latency for the common case.
+
+###### Dynamic Configuration Generation
+
+Since resources are launched dynamically at runtime, `bringToLife` generates temporary YAML configuration files for each new Agent and MemSpace process:
+
+```
+bringToLife 
+  → GenerateAgentConfig() 
+  → /tmp/nucleusmem/configs/agent_{id}.yaml
+  → Manager.Launch(binPath, configPath)
+  → Monitor starts the process using the generated config
 ```
 
-These fields are populated during `bringToLife` based on the decomposition output and enable:
-- **Permission isolation**: Private MemSpaces restrict access to `RepresentedAgentID`
-- **Resource sharing**: `SharedMemSpaceIDs` allow child nodes to read parent context
-- **Audit scoping**: Global ViewSpace can trace actions across all `WorkerAgentIDs`
+This approach:
+- ✅ Avoids hardcoding infrastructure details
+- ✅ Maintains compatibility with the existing config-based launch mechanism
+- ✅ In production (Kubernetes), this would be replaced by CRD-based resource specifications
+
+---
 
 ##### 2.5.3.4 Tool Execution: From Sequential to DAG-Concurrent
 
