@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -863,4 +864,34 @@ func TestToolDAG_execution(t *testing.T) {
 	}
 
 	t.Log("✅ ToolDAG integration test passed using native APIs only!")
+}
+func Test_Binding(t *testing.T) {
+	agentConfigFilePath := "../../configs/file/agent_101.yaml"
+	agentConfigFilePath1 := "../../configs/file/memspace_1001.yaml"
+	yaml, _ := configs.LoadAgentConfigFromYAML(agentConfigFilePath)
+	memspaceConfigFile := "./pkg/configs/file/memspace_1001.yaml"
+	fromYAML, _ := configs.LoadMemSpaceConfigFromYAML(agentConfigFilePath1)
+	_ = client.NewMemSpaceManagerClient("localhost:9200")
+	//agManagerClient := client.NewAgentManagerClient("localhost:7007")
+	mmManagerClient := client.NewMemSpaceManagerClient("localhost:9200")
+	lmRequest := &api.LaunchMemSpaceRequestManager{BinPath: "./bin/memspace", ConfigFilePath: memspaceConfigFile}
+	err := mmManagerClient.LaunchMemSpace(lmRequest)
+	assert.NoError(t, err)
+	// 测一下是否绑定咯
+	agentClient := client.NewAgentClient(yaml.HttpAddr)
+	request := &api.BindMemSpaceRequest{
+		MemSpaceID: strconv.FormatUint(fromYAML.MemSpaceID, 10),
+		AgentID:    yaml.AgentId,
+		Type:       "private",
+	}
+	err = agentClient.BindMemSpace(request)
+	assert.NoError(t, err)
+}
+
+func Test_Server(t *testing.T) {
+	agentConfigFilePath := "../../configs/file/agent_101.yaml"
+	yaml, _ := configs.LoadAgentConfigFromYAML(agentConfigFilePath)
+	agent, _ := NewAgent(yaml)
+	server := NewAgentHTTPServer(agent)
+	server.Start(yaml.HttpAddr)
 }

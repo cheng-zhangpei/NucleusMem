@@ -253,6 +253,7 @@ func (mm *MemSpaceMonitor) LaunchMemSpace(req *api.LaunchMemSpaceRequest) (*MemS
 	// Step 1: Load config to get MemSpaceID
 	memspaceCfg, err := configs.LoadMemSpaceConfigFromYAML(req.ConfigFilePath)
 	if err != nil {
+		log.Errorf("Failed to load memspace config: %v", err)
 		return nil, fmt.Errorf("failed to load memspace config: %w", err)
 	}
 
@@ -260,6 +261,7 @@ func (mm *MemSpaceMonitor) LaunchMemSpace(req *api.LaunchMemSpaceRequest) (*MemS
 	defer mm.mu.Unlock()
 
 	if _, exists := mm.memspaces[memspaceCfg.MemSpaceID]; exists {
+		log.Errorf("memspace %d already exists", memspaceCfg.MemSpaceID)
 		return nil, fmt.Errorf("memspace %d already running", memspaceCfg.MemSpaceID)
 	}
 
@@ -268,7 +270,7 @@ func (mm *MemSpaceMonitor) LaunchMemSpace(req *api.LaunchMemSpaceRequest) (*MemS
 
 	// Step 2: Start process
 	cmd := exec.Command(req.BinPath, "--config", req.ConfigFilePath)
-
+	log.Infof("the cmd will be executed: %s", cmd.String())
 	if req.Env != nil {
 		cmd.Env = os.Environ()
 		for k, v := range req.Env {
@@ -280,6 +282,8 @@ func (mm *MemSpaceMonitor) LaunchMemSpace(req *api.LaunchMemSpaceRequest) (*MemS
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		log.Errorf("Failed to launch memspace: %v", err)
+		log.Infof("   WorkDir: %s", cmd.Dir)
 		return nil, fmt.Errorf("failed to start memspace process: %w", err)
 	}
 
@@ -297,6 +301,8 @@ func (mm *MemSpaceMonitor) LaunchMemSpace(req *api.LaunchMemSpaceRequest) (*MemS
 	_, err = memspaceClient.HealthCheckWithInfo()
 	if err != nil {
 		log.Warnf("MemSpace %d health check failed: %v", memspaceCfg.MemSpaceID, err)
+	} else {
+		log.Infof("MemSpace %d health check passed", memspaceCfg.MemSpaceID)
 	}
 
 	// Step 5: Register in monitor

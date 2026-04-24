@@ -215,7 +215,8 @@ func (c *AgentClient) BindMemSpace(req *api.BindMemSpaceRequest) error {
 	var resp map[string]interface{}
 	err := c.post("/api/v1/agent/bind_memspace", req, &resp)
 	if err != nil {
-		return fmt.Errorf("bind memspace failed: %w", err)
+		//log.Errorf("err occurred posting bind_memspace request: %v", err)
+		return fmt.Errorf("bind memspace failed: %v", err.Error())
 	}
 	if success, ok := resp["success"].(bool); !ok || !success {
 		msg := "unknown error"

@@ -9,6 +9,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 // MemSpaceManagerHTTPServer handles HTTP requests for MemSpaceManager
@@ -51,11 +52,29 @@ func (s *MemSpaceManagerHTTPServer) handleBindMemSpace(w http.ResponseWriter, r 
 		return
 	}
 
-	// 调用 Manager 绑定方法（传入 addr 和 role）
-	err = s.manager.BindMemSpaceToAgent(agentID, memspaceID, req.Role, req.Addr)
+	const (
+		maxRetries   = 3 // max retry count
+		initialDelay = 500 * time.Millisecond
+	)
+
+	var lastErr error
+	for i := 0; i <= maxRetries; i++ {
+		lastErr = s.manager.BindMemSpaceToAgent(agentID, memspaceID, req.Role, req.Addr)
+		if lastErr == nil {
+			break
+		}
+		if i == maxRetries {
+			log.Errorf("binding: failed after %d retries. Last error: %v", maxRetries, lastErr)
+			break
+		}
+		backoffTime := initialDelay * time.Duration(1<<uint(i))
+		log.Warnf("binding: attempt %d failed (%v). Retrying in %v...", i+1, lastErr, backoffTime)
+		time.Sleep(backoffTime)
+	}
 
 	resp := api.BindMemSpaceResponseManager{Success: err == nil}
 	if err != nil {
+		log.Errorf("binding: the err is %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}

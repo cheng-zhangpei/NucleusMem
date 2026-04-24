@@ -362,6 +362,9 @@ func (t *ViewSpaceTree) bindAgentToMemSpace(
 					agentID, memSpaceID, attempt)
 			}
 			return nil
+		} else {
+			log.Errorf("error occur in binding process! %v", err)
+
 		}
 
 		lastErr = err

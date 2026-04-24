@@ -113,7 +113,6 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 	t.Growth.Record("decompose", node.Name,
 		fmt.Sprintf("Decomposed into %d children, %d dataflows",
 			len(spawnResult.Children), len(spawnResult.Dataflow)), t)
-
 	// Step 3: Spawn children
 	for _, childDef := range spawnResult.Children {
 		child := &ViewSpaceNode{

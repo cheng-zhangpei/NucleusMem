@@ -156,6 +156,7 @@ func (mm *MemSpaceManager) LaunchMemspace(config *configs.MemSpaceConfig) error 
 	mm.mu.RUnlock()
 
 	if targetMonitor == nil {
+		log.Errorf("no available monitor")
 		return fmt.Errorf("no available monitor")
 	}
 
@@ -166,6 +167,7 @@ func (mm *MemSpaceManager) LaunchMemspace(config *configs.MemSpaceConfig) error 
 		nil,
 	)
 	if err != nil {
+		log.Errorf("can not launch memspace %d: %v", config.BinPath, err)
 		return fmt.Errorf("failed to launch memspace on monitor %d: %w", targetNodeID, err)
 	}
 

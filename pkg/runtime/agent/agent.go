@@ -655,7 +655,7 @@ func (a *Agent) bindingMemSpace(memSpaceConfig *configs.MemSpaceConfig) error {
 		agentRole,
 	)
 	if err != nil {
-		log.Infof("failed to bind memspace via manager: %w", err)
+		log.Errorf("can not bind memspace to agent through the memspace manager %d: %v", a.AgentId, err)
 		return fmt.Errorf("failed to bind memspace via manager: %w", err)
 	}
 	log.Infof("[Agent %d] Successfully bound to MemSpace %d via Manager", a.AgentId, memSpaceConfig.MemSpaceID)

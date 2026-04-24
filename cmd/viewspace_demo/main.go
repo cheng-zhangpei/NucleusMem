@@ -287,9 +287,9 @@ func main() {
 	llmAddr := "127.0.0.1:20001"
 
 	// 二进制路径 — 改成你实际的路径
-	agentBin := "/home/chengzipi/Public/project/NucleusMem/bin/agent"
+	agentBin := "./bin/agent"
 	agentCfg := "" // 动态生成，不需要模板
-	msBin := "/home/chengzipi/Public/project/NucleusMem/bin/memspace"
+	msBin := "./bin/memspace"
 	msCfg := "" // 动态生成，不需要模板
 	// 端口分配起点
 	basePort := 22000
