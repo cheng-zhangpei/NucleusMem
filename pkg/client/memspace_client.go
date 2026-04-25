@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 	"strings"
 	"time"
@@ -94,20 +95,47 @@ func (c *MemSpaceClient) GetMemoryContext(summaryBefore int64, query string, n i
 
 // RegisterAgent registers an agent in the Comm Region
 func (c *MemSpaceClient) RegisterAgent(agentID uint64, addr, role string) error {
-	req := api.RegisterAgentRequest{
-		AgentID: fmt.Sprintf("%d", agentID),
-		Addr:    addr,
-		Role:    role,
+	const (
+		maxRetries     = 5                // 最大重试 5 次
+		initialBackoff = 1 * time.Second  // 初始等待 1 秒
+		maxBackoff     = 10 * time.Second // 最大等待 10 秒
+		backoffFactor  = 2.0              // 翻倍增长
+	)
+	var lastErr error
+	backoff := initialBackoff
+	for i := 0; i < maxRetries; i++ {
+		req := api.RegisterAgentRequest{
+			AgentID: fmt.Sprintf("%d", agentID),
+			Addr:    addr,
+			Role:    role,
+		}
+		var resp api.RegisterAgentResponse
+		err := c.post("/api/v1/memspace/register_agent", req, &resp)
+		if err != nil {
+			lastErr = err
+			log.Warnf("RegisterAgent (Attempt %d/%d) failed for agent %d: %v. Retrying in %v...",
+				i+1, maxRetries, agentID, err, backoff)
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * backoffFactor)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		if !resp.Success {
+			lastErr = fmt.Errorf("register agent failed: %s", resp.ErrorMessage)
+			log.Warnf("RegisterAgent (Attempt %d/%d) failed for agent %d: %s. Retrying in %v...",
+				i+1, maxRetries, agentID, resp.ErrorMessage, backoff)
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * backoffFactor)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+		return nil
 	}
-	var resp api.RegisterAgentResponse
-	err := c.post("/api/v1/memspace/register_agent", req, &resp)
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("register agent failed: %s", resp.ErrorMessage)
-	}
-	return nil
+	return fmt.Errorf("failed to register agent %d after %d retries: %w", agentID, maxRetries, lastErr)
 }
 
 // UnregisterAgent removes an agent from the registry
@@ -433,6 +461,104 @@ func (c *MemSpaceClient) RecordToolExecBatch(results map[string]*configs.ToolExe
 	}
 	if !resp.Success {
 		return fmt.Errorf("record tool exec batch failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// ============================================================
+// Standard Tool Client Methods
+// ============================================================
+
+// RegisterStandardTool registers a new standard tool definition
+func (c *MemSpaceClient) RegisterStandardTool(tool *configs.StandardToolDefinition) error {
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/standard_tool/register", tool, &resp)
+	if err != nil {
+		return fmt.Errorf("register standard tool failed: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("register standard tool failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// GetStandardTool retrieves a standard tool definition by name
+func (c *MemSpaceClient) GetStandardTool(name string) (*configs.StandardToolDefinition, error) {
+	req := struct {
+		Name string `json:"name"`
+	}{
+		Name: name,
+	}
+
+	var resp struct {
+		Success bool                            `json:"success"`
+		Tool    *configs.StandardToolDefinition `json:"tool,omitempty"`
+		Error   string                          `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/standard_tool/get", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("get standard tool failed: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("get standard tool failed: %s", resp.Error)
+	}
+
+	if resp.Tool == nil {
+		return nil, fmt.Errorf("tool definition is nil")
+	}
+
+	return resp.Tool, nil
+}
+
+// ListStandardTools lists all registered standard tools
+func (c *MemSpaceClient) ListStandardTools() ([]*configs.StandardToolDefinition, error) {
+	req := map[string]interface{}{} // Empty request body
+
+	var resp struct {
+		Success bool                              `json:"success"`
+		Tools   []*configs.StandardToolDefinition `json:"tools,omitempty"`
+		Error   string                            `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/standard_tool/list", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("list standard tools failed: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("list standard tools failed: %s", resp.Error)
+	}
+
+	return resp.Tools, nil
+}
+
+// DeleteStandardTool deletes a standard tool definition by name
+func (c *MemSpaceClient) DeleteStandardTool(name string) error {
+	req := struct {
+		Name string `json:"name"`
+	}{
+		Name: name,
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	err := c.post("/api/v1/memspace/standard_tool/delete", req, &resp)
+	if err != nil {
+		return fmt.Errorf("delete standard tool failed: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("delete standard tool failed: %s", resp.Error)
 	}
 	return nil
 }

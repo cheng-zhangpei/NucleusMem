@@ -754,6 +754,139 @@ func (s *MemSpaceHTTPServer) handleGetToolExecHistory(w http.ResponseWriter, r *
 	json.NewEncoder(w).Encode(resp)
 }
 
+// ============================================================
+// Standard Tool Handlers (New Interface)
+// ============================================================
+
+// POST /api/v1/memspace/standard_tool/register
+func (s *MemSpaceHTTPServer) handleRegisterStandardTool(w http.ResponseWriter, r *http.Request) {
+	var req configs.StandardToolDefinition
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	err := s.memSpace.ToolRegion.RegisterStandardTool(&req)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to register standard tool: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool `json:"success"`
+	}{
+		Success: true,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/standard_tool/get
+func (s *MemSpaceHTTPServer) handleGetStandardTool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		http.Error(w, "tool name is required", http.StatusBadRequest)
+		return
+	}
+
+	tool, err := s.memSpace.ToolRegion.GetStandardTool(req.Name)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Standard tool not found: %v", err),
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool                            `json:"success"`
+		Tool    *configs.StandardToolDefinition `json:"tool"`
+	}{
+		Success: true,
+		Tool:    tool,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/standard_tool/list
+func (s *MemSpaceHTTPServer) handleListStandardTools(w http.ResponseWriter, r *http.Request) {
+	tools, err := s.memSpace.ToolRegion.ListStandardTools()
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to list standard tools: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool                              `json:"success"`
+		Tools   []*configs.StandardToolDefinition `json:"tools"`
+	}{
+		Success: true,
+		Tools:   tools,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/standard_tool/delete
+func (s *MemSpaceHTTPServer) handleDeleteStandardTool(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	err := s.memSpace.ToolRegion.DeleteStandardTool(req.Name)
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to delete standard tool: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success bool `json:"success"`
+	}{
+		Success: true,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
 // Start initializes and starts the HTTP server
 func (s *MemSpaceHTTPServer) Start() error {
 	mux := http.NewServeMux()
@@ -785,6 +918,11 @@ func (s *MemSpaceHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/memspace/tool/exec/batch", s.handleRecordToolExecBatch)
 	mux.HandleFunc("/api/v1/memspace/tool/dag/save", s.handleSaveToolDAG)
 	mux.HandleFunc("/api/v1/memspace/tool/exec/history", s.handleGetToolExecHistory)
+
+	mux.HandleFunc("/api/v1/memspace/standard_tool/register", s.handleRegisterStandardTool)
+	mux.HandleFunc("/api/v1/memspace/standard_tool/get", s.handleGetStandardTool)
+	mux.HandleFunc("/api/v1/memspace/standard_tool/list", s.handleListStandardTools)
+	mux.HandleFunc("/api/v1/memspace/standard_tool/delete", s.handleDeleteStandardTool)
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

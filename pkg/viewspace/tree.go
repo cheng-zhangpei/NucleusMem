@@ -226,6 +226,7 @@ func (t *ViewSpaceTree) seed(taskDescription string) (*ViewSpaceNode, error) {
 
 	return node, nil
 }
+
 func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
 	// ============ Phase 1: Primary MemSpace ============
 	msID, msAddr, err := t.launchMemSpaceWithRetry(
@@ -244,8 +245,6 @@ func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
 
 	t.Growth.Record("bringToLife", node.Name,
 		fmt.Sprintf("MemSpace launched → %d@%s", msID, msAddr), t)
-
-	// ============ Phase 2: Represented Agent ============
 	agentID, agentAddr, err := t.launchAgentWithRetry(node.Role)
 	if err != nil {
 		return fmt.Errorf("[bringToLife] '%s': %w", node.Name, err)
@@ -321,7 +320,8 @@ func (t *ViewSpaceTree) bringToLife(node *ViewSpaceNode) error {
 			fmt.Sprintf("Mounted %d@%s (source=%s)", mounted.MemSpaceID, mounted.Addr, mounted.Source), t)
 	}
 
-	// ============ Phase 6: Done ============
+	// ============ Phase 6: Inject the tool dag into the toolDAG region ============
+
 	node.Status = NodeStatusReady
 	return nil
 }

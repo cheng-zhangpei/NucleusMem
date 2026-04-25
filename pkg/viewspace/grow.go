@@ -86,7 +86,7 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 		return fmt.Errorf("submit to '%s': %w", node.Name, err)
 	}
 
-	resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 120*time.Second)
+	resultResp, err := node.AgentClient.GetTaskResult(submitResp.TaskID, 5*time.Minute)
 	if err != nil {
 		node.Status = NodeStatusFailed
 		t.Growth.Record("failed", node.Name,
@@ -166,6 +166,8 @@ func (t *ViewSpaceTree) Grow(node *ViewSpaceNode) error {
 			if child.MemSpaceClient != nil {
 				if err := child.MemSpaceClient.SaveToolDAG(dag); err != nil {
 					log.Warnf("[Grow] Failed to save ToolDAG for %s: %v", child.Name, err)
+				} else {
+					log.Infof("[Grow] Saved ToolDAG for %s ", child.Name)
 				}
 			}
 		}

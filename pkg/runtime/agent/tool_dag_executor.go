@@ -36,24 +36,19 @@ func NewToolDAGExecutor(agent *Agent, dag *configs.ToolDAG, memSpaceID uint64, t
 func (e *ToolDAGExecutor) Execute(ctx context.Context) (map[string]*configs.ToolExecResult, error) {
 	log.Infof("[ToolDAG] Starting execution for task %s, %d nodes, %d edges",
 		e.taskID, len(e.dag.Nodes), len(e.dag.Edges))
-
 	// Build dependency map: toolName -> [dependencies]
 	deps := e.buildDependencyMap()
-
 	// Execution context tracks completion status
 	execCtx := newToolExecContext(len(e.dag.Nodes))
-
 	// Channel to collect results from goroutines
 	type toolResult struct {
 		name   string
 		result *configs.ToolExecResult
 	}
 	resultCh := make(chan toolResult, len(e.dag.Nodes))
-
 	// Track which tools have been started to avoid duplicate execution
 	started := make(map[string]bool)
 	var startMu sync.Mutex
-
 	// tryStartReady checks which tools are ready and launches them
 	var tryStartReady func()
 	tryStartReady = func() {

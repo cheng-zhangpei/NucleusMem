@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"io"
 	"net/http"
 	"net/url"
@@ -282,24 +283,60 @@ func (c *AgentClient) SubmitTask(req *api.SubmitTaskRequest) (*api.SubmitTaskRes
 	return &resp, nil
 }
 
-// GetTaskResult polls for a task result by taskID
-func (c *AgentClient) GetTaskResult(taskID string, timeout time.Duration) (*api.GetTaskResultResponse, error) {
-	// Set a longer timeout for this call since we're waiting for LLM
-	originalTimeout := c.HttpClient.Timeout
-	c.HttpClient.Timeout = timeout + 5*time.Second
-	defer func() { c.HttpClient.Timeout = originalTimeout }()
+// GetTaskResult 带有简单指数退避的重试机制
+func (c *AgentClient) GetTaskResult(taskID string, maxWaitTime time.Duration) (*api.GetTaskResultResponse, error) {
+	startTime := time.Now()
+	retryCount := 0
+	backoff := 2 * time.Second // 初始等待 2 秒
 
-	req := &api.GetTaskResultRequest{
-		TaskID:    taskID,
-		TimeoutMs: int64(timeout / time.Millisecond),
+	for {
+		// 1. 检查总超时
+		if time.Since(startTime) > maxWaitTime {
+			return nil, fmt.Errorf("task %s timed out after %v (gave up after %d retries)", taskID, maxWaitTime, retryCount)
+		}
+
+		// 2. 设置单次请求超时 (比退避时间稍长，防止请求还没发出去就断了)
+		c.HttpClient.Timeout = backoff + 5*time.Second
+
+		// 3. 发起请求
+		req := &api.GetTaskResultRequest{
+			TaskID:    taskID,
+			TimeoutMs: int64(backoff / time.Millisecond), // 告诉服务端大概等多久
+		}
+
+		var resp api.GetTaskResultResponse
+		err := c.post("/api/v1/agent/task_result", req, &resp)
+
+		// 4. 只要有 err (网络错 或 业务Success=false)，就重试
+		if err != nil {
+			retryCount++
+			log.Warnf("⚠️ Attempt %d failed for task %s: %v. Retrying in %v...", retryCount, taskID, err, backoff)
+
+			time.Sleep(backoff)
+
+			// 指数退避：2s -> 4s -> 8s -> 16s -> 30s (封顶)
+			backoff = backoff * 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			continue
+		}
+
+		// 5. 如果没 err，说明成功了 (假设服务端只有成功才返回 nil err)
+		// 注意：如果你的 post 方法在 resp.Success==false 时也返回 nil err，
+		// 你需要在这里加一个 if !resp.Success { continue }
+		if !resp.Success {
+			retryCount++
+			log.Warnf("Attempt %d failed for task %s: %s. Retrying in %v...", retryCount, taskID, resp.ErrorMessage, backoff)
+			time.Sleep(backoff)
+			backoff = backoff * 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			continue
+		}
+
+		log.Infof("✅ Task %s completed after %d retries.", taskID, retryCount)
+		return &resp, nil
 	}
-	var resp api.GetTaskResultResponse
-	err := c.post("/api/v1/agent/task_result", req, &resp)
-	if err != nil {
-		return nil, fmt.Errorf("get task result failed: %w", err)
-	}
-	if !resp.Success {
-		return nil, fmt.Errorf("get task result failed: %s", resp.ErrorMessage)
-	}
-	return &resp, nil
 }

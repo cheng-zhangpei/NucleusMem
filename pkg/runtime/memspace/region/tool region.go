@@ -8,12 +8,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"sync"
 	"time"
 )
 
 const ToolSeqKey = "tool_seq"
 const ToolDAGKey = "tool/dag"
+const StandardToolPrefix = "tool/standard/def/" // 新标准工具的存放路径
 
 // ToolDefinition describes a single tool that agents can invoke
 
@@ -177,6 +179,7 @@ func (tr *ToolRegion) FindToolsByTags(tags []string) ([]*configs.ToolDefinition,
 func (tr *ToolRegion) SaveToolDAG(dag *configs.ToolDAG) error {
 	data, err := json.Marshal(dag)
 	if err != nil {
+		log.Errorf("failed to marshal tool DAG: %v", err)
 		return fmt.Errorf("failed to marshal tool DAG: %w", err)
 	}
 
@@ -199,6 +202,7 @@ func (tr *ToolRegion) LoadToolDAG() (*configs.ToolDAG, error) {
 		return json.Unmarshal(data, &dag)
 	})
 	if err != nil {
+		log.Errorf("failed to load ToolDAG from memspace: %v", err)
 		return nil, err
 	}
 	return &dag, nil
@@ -420,4 +424,129 @@ func (tr *ToolRegion) RecordToolExecBatch(results map[string]*configs.ToolExecRe
 		}
 		return nil
 	})
+}
+func (tr *ToolRegion) standardToolKey(toolName string) []byte {
+	userKey := []byte(fmt.Sprintf("%s%s", StandardToolPrefix, toolName))
+	return configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, userKey)
+}
+
+// ============================================================
+// Standard Tool Definition Management (New Interface)
+// ============================================================
+
+// RegisterStandardTool stores a strongly-typed standard tool definition
+func (tr *ToolRegion) RegisterStandardTool(tool *configs.StandardToolDefinition) error {
+	// 1. 基础校验
+	if tool.Name == "" {
+		return fmt.Errorf("standard tool name cannot be empty")
+	}
+	if tool.Type == "" {
+		return fmt.Errorf("standard tool type cannot be empty")
+	}
+
+	// 2. 类型特定的配置校验
+	if err := validateStandardToolConfig(tool); err != nil {
+		return fmt.Errorf("invalid standard tool config for type '%s': %w", tool.Type, err)
+	}
+	if tool.TimeoutSeconds == 0 {
+		tool.TimeoutSeconds = 30 // 默认 30s 超时
+	}
+
+	// 4. 序列化与存储
+	data, err := json.Marshal(tool)
+	if err != nil {
+		return fmt.Errorf("failed to marshal standard tool definition: %w", err)
+	}
+
+	rawKey := tr.standardToolKey(tool.Name)
+	return tr.kvClient.Update(func(txn storage.Transaction) error {
+		return txn.Put(rawKey, data)
+	})
+}
+
+// GetStandardTool retrieves a single standard tool definition by name
+func (tr *ToolRegion) GetStandardTool(toolName string) (*configs.StandardToolDefinition, error) {
+	rawKey := tr.standardToolKey(toolName)
+	var tool configs.StandardToolDefinition
+
+	err := tr.kvClient.Update(func(txn storage.Transaction) error { // 使用 View 进行只读操作
+		data, err := txn.Get(rawKey)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, &tool)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("standard tool '%s' not found: %w", toolName, err)
+	}
+	return &tool, nil
+}
+
+// ListStandardTools returns all standard tool definitions in this MemSpace
+func (tr *ToolRegion) ListStandardTools() ([]*configs.StandardToolDefinition, error) {
+	prefix := configs.EncodeKey(configs.ZoneTool, tr.memSpaceID, []byte(StandardToolPrefix))
+	var tools []*configs.StandardToolDefinition
+
+	err := tr.kvClient.Update(func(txn storage.Transaction) error {
+		kvPairs, err := txn.Scan(prefix)
+		if err != nil {
+			return err
+		}
+		for _, pair := range kvPairs {
+			var tool configs.StandardToolDefinition
+			if err := json.Unmarshal(pair.Value, &tool); err != nil {
+				log.Warnf("failed to unmarshal standard tool at key %s: %v", string(pair.Key), err)
+				continue
+			}
+			tools = append(tools, &tool)
+		}
+		return nil
+	})
+	return tools, err
+}
+
+// DeleteStandardTool removes a standard tool definition
+func (tr *ToolRegion) DeleteStandardTool(toolName string) error {
+	rawKey := tr.standardToolKey(toolName)
+	return tr.kvClient.Update(func(txn storage.Transaction) error {
+		return txn.Delete(rawKey)
+	})
+}
+
+// validateStandardToolConfig 根据 Type 校验对应的 Config 字段
+func validateStandardToolConfig(tool *configs.StandardToolDefinition) error {
+	switch tool.Type {
+	case configs.TypeHTTP:
+		if tool.HTTPConfig == nil {
+			return fmt.Errorf("http_config is required for http type")
+		}
+		if tool.HTTPConfig.URL == "" {
+			return fmt.Errorf("url is required in http_config")
+		}
+	case configs.TypeShell:
+		if tool.ShellConfig == nil {
+			return fmt.Errorf("shell_config is required for shell type")
+		}
+		if tool.ShellConfig.CommandTemplate == "" {
+			return fmt.Errorf("command_template is required in shell_config")
+		}
+	case configs.TypeMCP:
+		if tool.MCPConfig == nil {
+			return fmt.Errorf("mcp_config is required for mcp type")
+		}
+		if tool.MCPConfig.ServerName == "" || tool.MCPConfig.ToolName == "" {
+			return fmt.Errorf("server_name and tool_name are required in mcp_config")
+		}
+	case configs.TypeDelegate:
+		if tool.DelegateConfig == nil {
+			return fmt.Errorf("delegate_config is required for delegate type")
+		}
+		if tool.DelegateConfig.AgentType == "" {
+			return fmt.Errorf("agent_type is required in delegate_config")
+		}
+	default:
+		return fmt.Errorf("unsupported standard tool type: %s", tool.Type)
+	}
+	return nil
 }

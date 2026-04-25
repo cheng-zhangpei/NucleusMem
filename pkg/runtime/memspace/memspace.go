@@ -455,3 +455,18 @@ func (m *MemSpace) RecordToolExecBatch(results map[string]*configs.ToolExecResul
 func (m *MemSpace) GetToolExecHistory(toolName string) ([]*configs.ToolExecRecord, error) {
 	return m.ToolRegion.GetToolExecHistory(toolName)
 }
+
+// RegisterStandardTool registers a new standard tool into the ToolRegion
+func (m *MemSpace) RegisterStandardTool(tool *configs.StandardToolDefinition) error {
+	return m.ToolRegion.RegisterStandardTool(tool)
+}
+
+// GetStandardTool retrieves a standard tool by name
+func (m *MemSpace) GetStandardTool(name string) (*configs.StandardToolDefinition, error) {
+	return m.ToolRegion.GetStandardTool(name)
+}
+
+// ListStandardTools lists all registered standard tools
+func (m *MemSpace) ListStandardTools() ([]*configs.StandardToolDefinition, error) {
+	return m.ToolRegion.ListStandardTools()
+}

@@ -35,10 +35,11 @@ type Agent struct {
 	boundMonitorID         uint64
 	boundMu                sync.RWMutex
 
-	taskQueue      chan *AgentTask
-	taskResults    map[string]*TaskResult // taskID -> TaskResult
-	taskResultsMu  sync.RWMutex
-	toolDispatcher *tool_executors.Dispatcher
+	taskQueue         chan *AgentTask
+	taskResults       map[string]*TaskResult // taskID -> TaskResult
+	taskResultsMu     sync.RWMutex
+	toolDispatcher    *tool_executors.Dispatcher
+	standardExecutors *StandardExecutorRegistry
 }
 
 // NewAgent creates a new Agent and initializes all service clients
@@ -59,6 +60,7 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 		httpAddr:              config.HttpAddr,
 		role:                  config.Role,
 		toolDispatcher:        dispatcher,
+		standardExecutors:     NewStandardExecutorRegistry(),
 	}
 	//agent.bindingMemspace()
 	ctx, _ := context.WithCancel(context.Background())
@@ -380,6 +382,8 @@ func (a *Agent) handleTask(task *AgentTask) error {
 		result, err = a.handleDecomposeTask(task)
 	case TaskTypeToolDAG: // New case
 		result, err = a.handleToolDAGTask(task)
+	case TaskTypeStandardTool:
+		result, err = a.handleStandardToolTask(task)
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -789,16 +793,13 @@ func (a *Agent) handleToolTask(task *AgentTask) (string, error) {
 	if task.ToolName == "" {
 		return "", fmt.Errorf("tool_name is required")
 	}
-
 	log.Infof("Agent %d executing tool: %s, params: %v", a.AgentId, task.ToolName, task.Params)
-
 	// 查找工具定义
 	var toolDef *configs.ToolDefinition
 	a.mu.RLock()
 	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
 	copy(publicClients, a.publicMemSpaceClients)
 	a.mu.RUnlock()
-
 	for _, msClient := range publicClients {
 		if msClient == nil {
 			continue
@@ -847,6 +848,7 @@ func (a *Agent) completeToolExec(seq uint64, output map[string]interface{}, err 
 }
 
 // invokeTool calls the actual tool endpoint via the appropriate executor
+// todo 多类型任务支持
 func (a *Agent) invokeTool(tool *configs.ToolDefinition, params map[string]interface{}) (map[string]interface{}, error) {
 	if tool.Endpoint == "" && tool.ExecType == "" {
 		// No endpoint and no exec type → mock mode
@@ -890,7 +892,7 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 
 	maxRetry := task.MaxRetry
 	if maxRetry <= 0 {
-		maxRetry = 3
+		maxRetry = 5
 	}
 
 	availableTools := task.AvailableTools
@@ -1050,13 +1052,10 @@ func (a *Agent) handleToolDAGTask(task *AgentTask) (string, error) {
 	if task.ToolGraph != nil {
 		// Use provided graph directly
 	} else {
-		// Option B: Load from MemSpace - need memspace_id
 		memspaceIDRaw, ok := task.Params["memspace_id"]
 		if !ok {
 			return "", fmt.Errorf("ToolDAG task missing tool_graph or memspace_id")
 		}
-
-		// 🔥 JSON unmarshaling converts numbers to float64, handle all cases
 		switch v := memspaceIDRaw.(type) {
 		case uint64:
 			memspaceID = v
@@ -1077,13 +1076,11 @@ func (a *Agent) handleToolDAGTask(task *AgentTask) (string, error) {
 			return "", fmt.Errorf("memspace_id has unexpected type %T: %v", memspaceIDRaw, memspaceIDRaw)
 		}
 	}
-
 	// ============================================================
 	// 2. Load ToolDAG from MemSpace (if not provided directly)
 	// ============================================================
 	var dag *configs.ToolDAG
 	var err error
-
 	if task.ToolGraph != nil {
 		dag = task.ToolGraph
 	} else if memspaceID > 0 {
@@ -1108,13 +1105,11 @@ func (a *Agent) handleToolDAGTask(task *AgentTask) (string, error) {
 	// ============================================================
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-
 	executor := NewToolDAGExecutor(a, dag, memspaceID, task.ID)
 	results, err := executor.Execute(ctx)
 	if err != nil {
 		return "", fmt.Errorf("ToolDAG execution failed: %w", err)
 	}
-
 	// ============================================================
 	// 4. Record audit to MemSpace (async, non-blocking)
 	// ============================================================
@@ -1189,4 +1184,76 @@ func (a *Agent) getToolDefinition(toolName string, memSpaceID uint64) (*configs.
 		return nil, fmt.Errorf("memspace %d not bound", memSpaceID)
 	}
 	return msClient.GetTool(toolName)
+}
+
+// handleStandardToolTask is the entry point for Standard Tool execution
+func (a *Agent) handleStandardToolTask(task *AgentTask) (string, error) {
+	if task.ToolName == "" {
+		return "", fmt.Errorf("tool_name is required")
+	}
+
+	log.Infof("Agent %d executing STANDARD tool: %s", a.AgentId, task.ToolName)
+
+	// 1. 查找标准工具定义 (使用 Standard 前缀的查找函数)
+	stdToolDef, err := a.findStandardToolDefinition(task.ToolName)
+	if err != nil {
+		return "", fmt.Errorf("standard tool '%s' not found: %w", task.ToolName, err)
+	}
+
+	// 2. 执行标准工具 (使用 Standard 前缀的执行函数)
+	output, err := a.invokeStandardTool(stdToolDef, task.Params)
+	if err != nil {
+		return "", fmt.Errorf("standard tool execution failed: %w", err)
+	}
+
+	// 3. 返回结果
+	response := fmt.Sprintf("Standard Tool '%s' executed successfully. Results: %v", task.ToolName, output)
+	log.Infof("Agent %d standard tool %s completed", a.AgentId, task.ToolName)
+	return response, nil
+}
+
+// findStandardToolDefinition searches for a tool in all mounted MemSpaces
+func (a *Agent) findStandardToolDefinition(toolName string) (*configs.StandardToolDefinition, error) {
+	a.mu.RLock()
+	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	copy(publicClients, a.publicMemSpaceClients)
+	a.mu.RUnlock()
+	// todo emmm遍历效率会不会太低了但是自己玩无所谓了其实
+	for _, msClient := range publicClients {
+		if msClient == nil {
+			continue
+		}
+		// 调用 Client 的 Standard 接口
+		tool, err := msClient.GetStandardTool(toolName)
+		if err == nil {
+			return tool, nil
+		}
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+// invokeStandardTool dispatches to the correct executor based on Type
+func (a *Agent) invokeStandardTool(tool *configs.StandardToolDefinition, params map[string]interface{}) (map[string]interface{}, error) {
+	// 设置超时
+	timeout := time.Duration(tool.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	log.Infof("Agent %d dispatching STANDARD tool '%s' (Type: %s)", a.AgentId, tool.Name, tool.Type)
+	// 根据 Type 路由
+	switch tool.Type {
+	case configs.TypeHTTP:
+		return a.standardExecutors.HTTP.Execute(ctx, tool, params)
+	case configs.TypeShell:
+		return a.standardExecutors.Shell.Execute(ctx, tool, params)
+	case configs.TypeDelegate:
+		// Claude Code 走这里
+		return a.standardExecutors.Delegate.Execute(ctx, tool, params)
+	case configs.TypeMCP:
+		return a.standardExecutors.MCP.Execute(ctx, tool, params)
+	default:
+		return nil, fmt.Errorf("unsupported standard tool type: %s", tool.Type)
+	}
 }

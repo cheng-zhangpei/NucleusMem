@@ -5,13 +5,13 @@ import "NucleusMem/pkg/configs"
 type TaskType string
 
 const (
-	TaskTypeTempChat  = "temp_chat"
-	TaskTypeChat      = "chat"
-	TaskTypeComm      = "comm"
-	TaskTypeTool      = "tool"
-	TaskTypeDecompose = "decompose"
-	TaskTypeToolDAG   = "tool_dag" // New: For concurrent tool execution based on DAG
-
+	TaskTypeTempChat     = "temp_chat"
+	TaskTypeChat         = "chat"
+	TaskTypeComm         = "comm"
+	TaskTypeTool         = "tool"
+	TaskTypeDecompose    = "decompose"
+	TaskTypeToolDAG      = "tool_dag" // New: For concurrent tool execution based on DAG
+	TaskTypeStandardTool = "standard_tool"
 )
 
 type AgentTask struct {

@@ -291,7 +291,6 @@ func (s *AgentHTTPServer) handleGetTaskResult(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
-
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -304,7 +303,6 @@ func (s *AgentHTTPServer) handleGetTaskResult(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
-
 	writeJSON(w, http.StatusOK, api.GetTaskResultResponse{
 		Success: true, TaskID: req.TaskID, Result: result, Done: true,
 	})
