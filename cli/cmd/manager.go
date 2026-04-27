@@ -26,7 +26,6 @@ Requires the Manager service address (--manager flag).`,
 			cmd.Help()
 		},
 	}
-
 	// agent 子命令组
 	agentSubCmd := &cobra.Command{
 		Use:   "agent",
@@ -35,8 +34,14 @@ Requires the Manager service address (--manager flag).`,
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli manager agent list
 	agentSubCmd.AddCommand(newManagerAgentListCmd(agentMgrClient))
+
+	// nucleuscli manager agent launch --name myagent --role worker --bin /path/to/agent --image ubuntu:latest --mount-memspace ms1,ms2 --env KEY1=VAL1,KEY2=VAL2 --http-addr :9000 --config /path/to/config --is-job
 	agentSubCmd.AddCommand(newManagerAgentLaunchCmd(agentMgrClient))
+
+	// nucleuscli manager agent destroy --agent-id 3
 	agentSubCmd.AddCommand(newManagerAgentDestroyCmd(agentMgrClient))
 	managerCmd.AddCommand(agentSubCmd)
 
@@ -48,11 +53,16 @@ Requires the Manager service address (--manager flag).`,
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli manager memspace list
 	memspaceSubCmd.AddCommand(newManagerMemSpaceListCmd(memMgrClient))
+
+	// nucleuscli manager memspace launch --name myms --type volatile --owner-id 1 --description "test" --http-addr :8080 --pd-addr :2379 --embedding-addr :5000 --light-model-addr :6000 --summary-cnt 10 --summary-threshold 100 --bin /path/to/memspace --config /path/to/config
 	memspaceSubCmd.AddCommand(newManagerMemSpaceLaunchCmd(memMgrClient))
+
+	// nucleuscli manager memspace shutdown --memspace-id 5
 	memspaceSubCmd.AddCommand(newManagerMemSpaceShutdownCmd(memMgrClient))
 	managerCmd.AddCommand(memspaceSubCmd)
-
 	return managerCmd
 }
 

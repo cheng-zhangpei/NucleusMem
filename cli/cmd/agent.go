@@ -23,21 +23,31 @@ func NewAgentCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 		},
 	}
 
-	// 添加所有子命令
+	// nucleuscli agent chat --message "Hello, what can you do?"
 	agentCmd.AddCommand(newAgentChatCmd(agentClientPtr))
+	// nucleuscli agent tempchat --message "Tell me a joke"
 	agentCmd.AddCommand(newAgentTempChatCmd(agentClientPtr))
+	// nucleuscli agent bind --memspace-id 5
 	agentCmd.AddCommand(newAgentBindCmd(agentClientPtr))
+	// nucleuscli agent unbind --memspace-id 5
 	agentCmd.AddCommand(newAgentUnbindCmd(agentClientPtr))
+	// nucleuscli agent notify --key "alert" --content "Disk usage 90%"
 	agentCmd.AddCommand(newAgentNotifyCmd(agentClientPtr))
+	// nucleuscli agent health --monitor-id 1
 	agentCmd.AddCommand(newAgentHealthCmd(agentClientPtr))
+	// nucleuscli agent shutdown
 	agentCmd.AddCommand(newAgentShutdownCmd(agentClientPtr))
+	// nucleuscli agent communicate --target 10 --key "ask" --content "What is status?"
 	agentCmd.AddCommand(newAgentCommunicateCmd(agentClientPtr))
+	// nucleuscli agent task submit --type "compute" --content "Process data" ...
+	// nucleuscli agent task result --task-id "abc123"
 	agentCmd.AddCommand(newAgentTaskCmd(agentClientPtr))
 
 	return agentCmd
 }
 
 // ---------- chat ----------
+/*chat with the client, so the endpoint can be pointed by the user*/
 func newAgentChatCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 	var message string
 	cmd := &cobra.Command{

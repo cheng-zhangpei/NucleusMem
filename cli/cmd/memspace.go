@@ -31,10 +31,20 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace tool list
 	toolCmd.AddCommand(newMemSpaceToolListCmd(memspaceClientPtr))
+
+	// nucleuscli memspace tool get --name "stats_runner"
 	toolCmd.AddCommand(newMemSpaceToolGetCmd(memspaceClientPtr))
+
+	// nucleuscli memspace tool register --name "stats_runner" --description "Run statistics" --exec-type http --parameters '[{"name":"input","type":"string"}]' --return-type object --endpoint "/run" --metadata '{"version":"1.0"}'
 	toolCmd.AddCommand(newMemSpaceToolRegisterCmd(memspaceClientPtr))
+
+	// nucleuscli memspace tool delete --name "stats_runner"
 	toolCmd.AddCommand(newMemSpaceToolDeleteCmd(memspaceClientPtr))
+
+	// nucleuscli memspace tool find-by-tags --tags "data,stats"
 	toolCmd.AddCommand(newMemSpaceToolFindByTagsCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(toolCmd)
 
@@ -46,9 +56,17 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace standard-tool list
 	stdToolCmd.AddCommand(newMemSpaceStandardToolListCmd(memspaceClientPtr))
+
+	// nucleuscli memspace standard-tool get --name "get_weather"
 	stdToolCmd.AddCommand(newMemSpaceStandardToolGetCmd(memspaceClientPtr))
+
+	// nucleuscli memspace standard-tool register --name "get_weather" --type http --parameters '[{"name":"city","type":"string","required":true}]' --executor-config '{"url":"https://api.weather.com","method":"GET","param_location":"query"}'
 	stdToolCmd.AddCommand(newMemSpaceStandardToolRegisterCmd(memspaceClientPtr))
+
+	// nucleuscli memspace standard-tool delete --name "get_weather"
 	stdToolCmd.AddCommand(newMemSpaceStandardToolDeleteCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(stdToolCmd)
 
@@ -60,7 +78,11 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace dag save --dag '{"nodes":[...]}'
 	dagCmd.AddCommand(newMemSpaceDAGSaveCmd(memspaceClientPtr))
+
+	// nucleuscli memspace dag load
 	dagCmd.AddCommand(newMemSpaceDAGLoadCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(dagCmd)
 
@@ -72,8 +94,14 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace exec record --tool-name "stats_runner" --output '{"result":"ok"}' --error ""
 	execCmd.AddCommand(newMemSpaceExecRecordCmd(memspaceClientPtr))
+
+	// nucleuscli memspace exec batch-record --results '{"tool1":{...},"tool2":{...}}'
 	execCmd.AddCommand(newMemSpaceExecBatchRecordCmd(memspaceClientPtr))
+
+	// nucleuscli memspace exec history --tool-name "stats_runner"
 	execCmd.AddCommand(newMemSpaceExecHistoryCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(execCmd)
 
@@ -85,8 +113,14 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace memory write --content "This is a test memory" --agent-id 2
 	memoryCmd.AddCommand(newMemSpaceMemoryWriteCmd(memspaceClientPtr))
+
+	// nucleuscli memspace memory context --query "test" --n 10 --summary-before 1234567890
 	memoryCmd.AddCommand(newMemSpaceMemoryContextCmd(memspaceClientPtr))
+
+	// nucleuscli memspace memory get-by-key --key "some_raw_key"
 	memoryCmd.AddCommand(newMemSpaceMemoryGetByKeyCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(memoryCmd)
 
@@ -98,10 +132,20 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace agent list
 	agentCmd.AddCommand(newMemSpaceAgentListCmd(memspaceClientPtr))
+
+	// nucleuscli memspace agent register --agent-id 1 --addr "192.168.1.10:9000" --role "worker"
 	agentCmd.AddCommand(newMemSpaceAgentRegisterCmd(memspaceClientPtr))
+
+	// nucleuscli memspace agent unregister --agent-id 1
 	agentCmd.AddCommand(newMemSpaceAgentUnregisterCmd(memspaceClientPtr))
+
+	// nucleuscli memspace agent bind --agent-id 1 --addr "192.168.1.10:9000" --role "worker"
 	agentCmd.AddCommand(newMemSpaceAgentBindCmd(memspaceClientPtr))
+
+	// nucleuscli memspace agent unbind --agent-id 1
 	agentCmd.AddCommand(newMemSpaceAgentUnbindCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(agentCmd)
 
@@ -113,13 +157,17 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 			cmd.Help()
 		},
 	}
+
+	// nucleuscli memspace message send --from 1 --to 2 --key "query" --content "What is the status?"
 	msgCmd.AddCommand(newMemSpaceMessageSendCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(msgCmd)
 
 	// 健康检查 & 关闭
+	// nucleuscli memspace health
 	memspaceCmd.AddCommand(newMemSpaceHealthCmd(memspaceClientPtr))
-	memspaceCmd.AddCommand(newMemSpaceShutdownCmd(memspaceClientPtr))
 
+	// nucleuscli memspace shutdown
+	memspaceCmd.AddCommand(newMemSpaceShutdownCmd(memspaceClientPtr))
 	return memspaceCmd
 }
 
