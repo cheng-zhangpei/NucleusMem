@@ -1,5 +1,7 @@
 package api
 
+import "NucleusMem/pkg/configs"
+
 // pkg/api/memspace.go
 type MemSpaceHealthResponse struct {
 	Status      string `json:"status"`
@@ -110,4 +112,35 @@ type GetByKeyResponse struct {
 	Success bool   `json:"success"`
 	Value   string `json:"value,omitempty"` // raw JSON string
 	Error   string `json:"error,omitempty"`
+}
+type MemSpaceMetadata struct {
+	ID                string             `json:"id"`
+	Type              string             `json:"type"`
+	Status            string             `json:"status"`
+	BoundAgents       []AgentBindingInfo `json:"bound_agents"`
+	MemoryCount       uint64             `json:"memory_count"`
+	ToolCount         int                `json:"tool_count"`
+	StandardToolCount int                `json:"standard_tool_count"`
+	DAG               *configs.ToolDAG   `json:"dag,omitempty"`
+}
+
+type AgentBindingInfo struct {
+	AgentID uint64 `json:"agent_id"`
+	Addr    string `json:"addr"`
+	Role    string `json:"role"`
+	BoundAt int64  `json:"bound_at"`
+}
+
+// 获取元数据的响应
+type MemSpaceMetadataResponse struct {
+	Success  bool              `json:"success"`
+	Metadata *MemSpaceMetadata `json:"metadata"`
+	Error    string            `json:"error,omitempty"`
+}
+
+// 获取全部记忆内容的响应
+type MemSpaceMemoryContentsResponse struct {
+	Success  bool     `json:"success"`
+	Contents []string `json:"contents"`
+	Error    string   `json:"error,omitempty"`
 }

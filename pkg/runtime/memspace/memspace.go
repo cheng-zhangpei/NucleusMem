@@ -470,3 +470,78 @@ func (m *MemSpace) GetStandardTool(name string) (*configs.StandardToolDefinition
 func (m *MemSpace) ListStandardTools() ([]*configs.StandardToolDefinition, error) {
 	return m.ToolRegion.ListStandardTools()
 }
+
+type MemSpaceMetadata struct {
+	ID                string                 `json:"id"`
+	Type              MemSpaceType           `json:"type"`
+	Status            configs.MemSpaceStatus `json:"status"`
+	BoundAgents       []AgentBinding         `json:"bound_agents"`
+	MemoryCount       uint64                 `json:"memory_count"`
+	ToolCount         int                    `json:"tool_count"`
+	StandardToolCount int                    `json:"standard_tool_count"`
+	DAG               *configs.ToolDAG       `json:"dag,omitempty"`
+}
+
+// GetMetadata returns a snapshot of the MemSpace's internal state
+func (m *MemSpace) GetMetadata() (*MemSpaceMetadata, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	meta := &MemSpaceMetadata{
+		ID:     m.ID,
+		Type:   m.Type,
+		Status: m.status,
+	}
+
+	// Bound agents
+	agents := make([]AgentBinding, 0, len(m.boundAgents))
+	for _, b := range m.boundAgents {
+		agents = append(agents, *b)
+	}
+	meta.BoundAgents = agents
+
+	// Memory count
+	count, err := m.MemoryRegion.Count()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get memory count: %w", err)
+	}
+	meta.MemoryCount = count
+
+	// Tool definitions
+	tools, err := m.ToolRegion.ListTools()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tools: %w", err)
+	}
+	meta.ToolCount = len(tools)
+
+	// Standard tool definitions
+	stdTools, err := m.ToolRegion.ListStandardTools()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list standard tools: %w", err)
+	}
+	meta.StandardToolCount = len(stdTools)
+
+	// Tool DAG (non‑fatal if missing)
+	dag, err := m.ToolRegion.LoadToolDAG()
+	if err != nil {
+		log.Warnf("Failed to load DAG for metadata: %v", err)
+	} else {
+		meta.DAG = dag
+	}
+
+	return meta, nil
+}
+
+// GetAllMemoryContents returns the raw content of all memories stored in the MemoryRegion
+func (m *MemSpace) GetAllMemoryContents() ([]string, error) {
+	batch, err := m.MemoryRegion.GetAllWithKeys()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve memories: %w", err)
+	}
+
+	contents := make([]string, 0, len(batch))
+	for _, item := range batch {
+		contents = append(contents, item.Record.Content)
+	}
+	return contents, nil
+}

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"strconv"
 	"time"
 
@@ -60,7 +61,8 @@ func newAgentChatCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("chat failed: %w", err)
 			}
-			printJSON(resp)
+			log.Debugf("check the response %s", resp.Response)
+			printJSON(cmd, resp)
 			return nil
 		},
 	}
@@ -81,7 +83,7 @@ func newAgentTempChatCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("temp chat failed: %w", err)
 			}
-			printJSON(resp)
+			printJSON(cmd, resp)
 			return nil
 		},
 	}
@@ -168,7 +170,7 @@ func newAgentHealthCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("health check failed: %w", err)
 			}
-			printJSON(resp)
+			printJSON(cmd, resp)
 			return nil
 		},
 	}
@@ -306,7 +308,7 @@ func newAgentTaskResultCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("get task result failed: %w", err)
 			}
-			printJSON(resp)
+			printJSON(cmd, resp)
 			return nil
 		},
 	}
@@ -317,11 +319,11 @@ func newAgentTaskResultCmd(agentClientPtr **client.AgentClient) *cobra.Command {
 }
 
 // ---------- helper ----------
-func printJSON(v interface{}) {
+func printJSON(cmd *cobra.Command, v interface{}) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fmt.Printf("Unable to format output: %v\n", err)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Unable to format output: %v\n", err)
 		return
 	}
-	fmt.Println(string(b))
+	fmt.Fprintln(cmd.OutOrStdout(), string(b))
 }

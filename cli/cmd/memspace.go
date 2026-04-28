@@ -168,7 +168,15 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 
 	// nucleuscli memspace shutdown
 	memspaceCmd.AddCommand(newMemSpaceShutdownCmd(memspaceClientPtr))
+	// 元数据
+	// nucleuscli memspace metadata
+	memspaceCmd.AddCommand(newMemSpaceMetadataCmd(memspaceClientPtr))
+
+	// 在 memoryCmd 下增加 dump 子命令
+	// nucleuscli memspace memory dump
+	memoryCmd.AddCommand(newMemSpaceMemoryDumpCmd(memspaceClientPtr))
 	return memspaceCmd
+
 }
 
 // ============================================================
@@ -183,7 +191,7 @@ func newMemSpaceToolListCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(tools)
+			printJSON(cmd, tools)
 			return nil
 		},
 	}
@@ -199,7 +207,7 @@ func newMemSpaceToolGetCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(tool)
+			printJSON(cmd, tool)
 			return nil
 		},
 	}
@@ -296,7 +304,7 @@ func newMemSpaceToolFindByTagsCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(tools)
+			printJSON(cmd, tools)
 			return nil
 		},
 	}
@@ -317,7 +325,7 @@ func newMemSpaceStandardToolListCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(tools)
+			printJSON(cmd, tools)
 			return nil
 		},
 	}
@@ -333,7 +341,7 @@ func newMemSpaceStandardToolGetCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(tool)
+			printJSON(cmd, tool)
 			return nil
 		},
 	}
@@ -485,7 +493,7 @@ func newMemSpaceDAGLoadCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(dag)
+			printJSON(cmd, dag)
 			return nil
 		},
 	}
@@ -556,7 +564,7 @@ func newMemSpaceExecHistoryCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(records)
+			printJSON(cmd, records)
 			return nil
 		},
 	}
@@ -609,7 +617,7 @@ func newMemSpaceMemoryContextCmd(c **client.MemSpaceClient) *cobra.Command {
 				"summary":  summary,
 				"memories": memories,
 			}
-			printJSON(result)
+			printJSON(cmd, result)
 			return nil
 		},
 	}
@@ -651,7 +659,7 @@ func newMemSpaceAgentListCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(agents)
+			printJSON(cmd, agents)
 			return nil
 		},
 	}
@@ -788,7 +796,7 @@ func newMemSpaceHealthCmd(c **client.MemSpaceClient) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printJSON(resp)
+			printJSON(cmd, resp)
 			return nil
 		},
 	}
@@ -803,6 +811,34 @@ func newMemSpaceShutdownCmd(c **client.MemSpaceClient) *cobra.Command {
 				return err
 			}
 			fmt.Println("MemSpace shutdown initiated.")
+			return nil
+		},
+	}
+}
+func newMemSpaceMetadataCmd(c **client.MemSpaceClient) *cobra.Command {
+	return &cobra.Command{
+		Use:   "metadata",
+		Short: "Show MemSpace metadata (bound agents, tools, DAG, memory count, etc.)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := (*c).GetMetadata()
+			if err != nil {
+				return err
+			}
+			printJSON(cmd, resp)
+			return nil
+		},
+	}
+}
+func newMemSpaceMemoryDumpCmd(c **client.MemSpaceClient) *cobra.Command {
+	return &cobra.Command{
+		Use:   "dump",
+		Short: "Dump all memory contents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := (*c).GetAllMemoryContents()
+			if err != nil {
+				return err
+			}
+			printJSON(cmd, resp)
 			return nil
 		},
 	}

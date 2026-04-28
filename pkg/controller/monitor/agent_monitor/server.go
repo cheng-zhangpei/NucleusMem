@@ -19,6 +19,7 @@ func NewAgentMonitorHTTPServer(monitor *AgentMonitor) *AgentMonitorHTTPServer {
 func (s *AgentMonitorHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *http.Request) {
 	var reqHTTP api.LaunchAgentRequestHTTP
 	if err := json.NewDecoder(r.Body).Decode(&reqHTTP); err != nil {
+		log.Error("Decode error:", err)
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -39,12 +40,13 @@ func (s *AgentMonitorHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *htt
 		Success: err == nil,
 	}
 	if err != nil {
+		log.Error("LaunchAgentInternal error:", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
 		// 返回新 Agent 信息
 		resp.AgentID = agentInfo.AgentID
-		resp.HttpAddr = agentInfo.Addr
+		resp.HttpAddr = agentInfo.HTTPAddr
 		resp.NodeID = s.monitor.id
 	}
 
@@ -87,6 +89,7 @@ func (s *AgentMonitorHTTPServer) handleStopAgent(w http.ResponseWriter, r *http.
 		AgentID: req.AgentID,
 	}
 	if err != nil {
+		log.Errorf("StopAgent err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusNotFound)
 	}

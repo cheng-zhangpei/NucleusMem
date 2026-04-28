@@ -32,6 +32,7 @@ func (s *MemSpaceMonitorHTTPServer) handleLaunchMemSpace(w http.ResponseWriter, 
 	info, err := s.monitor.LaunchMemSpace(&req)
 	resp := api.LaunchMemSpaceResponse{Success: err == nil}
 	if err != nil {
+		log.Errorf("LaunchMemSpace err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	} else {
@@ -51,6 +52,7 @@ func (s *MemSpaceMonitorHTTPServer) handleStopMemSpace(w http.ResponseWriter, r 
 
 	memspaceID, err := strconv.ParseUint(req.MemSpaceID, 10, 64)
 	if err != nil {
+		log.Errorf("StopMemSpace err: %v", err)
 		http.Error(w, "Invalid memspace_id", http.StatusBadRequest)
 		return
 	}
@@ -58,6 +60,7 @@ func (s *MemSpaceMonitorHTTPServer) handleStopMemSpace(w http.ResponseWriter, r 
 	err = s.monitor.StopMemSpace(memspaceID)
 	resp := api.StopMemSpaceResponse{Success: err == nil}
 	if err != nil {
+		log.Errorf("StopMemSpace err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -87,6 +90,7 @@ func (s *MemSpaceMonitorHTTPServer) handleRegisterMemSpace(w http.ResponseWriter
 	err = s.monitor.RegisterMemSpace(memspaceID, req.Name, ownerID, req.Type, req.Addr)
 	resp := api.RegisterMemSpaceResponse{Success: err == nil}
 	if err != nil {
+		log.Errorf("RegisterMemSpace err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -110,6 +114,7 @@ func (s *MemSpaceMonitorHTTPServer) handleConnectMemSpace(w http.ResponseWriter,
 	err = s.monitor.ConnectToMemSpace(memspaceID, req.Addr)
 	resp := api.ConnectMemSpaceResponse{Success: err == nil}
 	if err != nil {
+		log.Errorf("ConnectMemSpace err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -133,6 +138,7 @@ func (s *MemSpaceMonitorHTTPServer) handleUnregisterMemSpace(w http.ResponseWrit
 	err = s.monitor.UnregisterMemSpace(memspaceID)
 	resp := api.UnregisterMemSpaceResponse{Success: err == nil}
 	if err != nil {
+		log.Errorf("UnregisterMemSpace err: %v", err)
 		resp.ErrorMessage = err.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}

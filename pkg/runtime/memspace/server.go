@@ -887,6 +887,58 @@ func (s *MemSpaceHTTPServer) handleDeleteStandardTool(w http.ResponseWriter, r *
 	json.NewEncoder(w).Encode(resp)
 }
 
+// POST /api/v1/memspace/metadata
+func (s *MemSpaceHTTPServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	meta, err := s.memSpace.GetMetadata()
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to get metadata: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success  bool              `json:"success"`
+		Metadata *MemSpaceMetadata `json:"metadata"`
+	}{
+		Success:  true,
+		Metadata: meta,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// POST /api/v1/memspace/memory/contents
+func (s *MemSpaceHTTPServer) handleAllMemoryContents(w http.ResponseWriter, r *http.Request) {
+	contents, err := s.memSpace.GetAllMemoryContents()
+	if err != nil {
+		resp := struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error"`
+		}{
+			Success: false,
+			Error:   fmt.Sprintf("Failed to get memory contents: %v", err),
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp := struct {
+		Success  bool     `json:"success"`
+		Contents []string `json:"contents"`
+	}{
+		Success:  true,
+		Contents: contents,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
 // Start initializes and starts the HTTP server
 func (s *MemSpaceHTTPServer) Start() error {
 	mux := http.NewServeMux()
@@ -923,6 +975,8 @@ func (s *MemSpaceHTTPServer) Start() error {
 	mux.HandleFunc("/api/v1/memspace/standard_tool/get", s.handleGetStandardTool)
 	mux.HandleFunc("/api/v1/memspace/standard_tool/list", s.handleListStandardTools)
 	mux.HandleFunc("/api/v1/memspace/standard_tool/delete", s.handleDeleteStandardTool)
+	mux.HandleFunc("/api/v1/memspace/metadata", s.handleMetadata)
+	mux.HandleFunc("/api/v1/memspace/memory/contents", s.handleAllMemoryContents)
 	log.Infof("MemSpace HTTP server listening on %s", addr)
 	return http.ListenAndServe(addr, mux)
 }

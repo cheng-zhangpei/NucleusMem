@@ -197,10 +197,12 @@ func (*AgentManager) BingMemSpace() error {
 func (am *AgentManager) LaunchAgentOnNode(ctx context.Context, nodeID uint64, req *api.LaunchAgentRequestHTTP) (*AgentInfo, error) {
 	monitorClient, ok := am.agentMonitorClient[nodeID]
 	if !ok {
+		log.Errorf("[agent_manager] Failed to get agent monitor client for node %d", nodeID)
 		return nil, fmt.Errorf("no client for node %d", nodeID)
 	}
 	resp, err := monitorClient.LaunchAgent(ctx, req)
 	if err != nil {
+		log.Errorf("[agent_manager] Failed to launch agent %d: %v", nodeID, err)
 		return nil, err
 	}
 	if !resp.Success {

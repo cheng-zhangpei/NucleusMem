@@ -3,6 +3,7 @@ package agent_manager
 import (
 	"NucleusMem/pkg/api"
 	"encoding/json"
+	"github.com/pingcap-incubator/tinykv/log"
 	"net/http"
 	"strconv"
 )
@@ -30,9 +31,14 @@ func (s *AgentManagerHTTPServer) handleLaunchAgent(w http.ResponseWriter, r *htt
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
-
+	log.Debugf("check the agentID which gonna start:%d", req.AgentID)
 	// 默认在 Node 1 启动（可扩展）
 	agentInfo, err := s.manager.LaunchAgentOnNode(r.Context(), 1, &req)
+	log.Debugf("check the agentID after launch:%d", agentInfo.AgentID)
+	if err != nil {
+		log.Errorf("can not launch agent: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 	resp := api.LaunchAgentResponseHTTP{
 		AgentID:  agentInfo.AgentID,
 		HttpAddr: agentInfo.HTTPAddr,

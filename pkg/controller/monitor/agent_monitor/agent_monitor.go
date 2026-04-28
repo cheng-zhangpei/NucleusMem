@@ -100,7 +100,6 @@ func (am *AgentMonitor) GetMonitorInfo() *AgentMonitorInfo {
 		ActiveAgents: activeAgents,
 	}
 }
-
 func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) (*api.AgentInfo, error) {
 	// Step 1: 加载 Agent 配置文件
 	agentCfg, err := configs.LoadAgentConfigFromYAML(req.ConfigFilePath)
@@ -153,8 +152,8 @@ func (am *AgentMonitor) LaunchAgentInternal(req *LaunchAgentInternalRequest) (*a
 	// Step 5: 注册到 Monitor
 	am.clients[agentCfg.AgentId] = agentClient
 	agentInfo := &api.AgentInfo{
-		AgentID: agentCfg.AgentId,
-		Addr:    agentCfg.HttpAddr,
+		AgentID:  agentCfg.AgentId,
+		HTTPAddr: agentCfg.HttpAddr,
 	}
 	am.agents[agentKey] = agentInfo
 
@@ -269,7 +268,7 @@ func (am *AgentMonitor) GetNodeSystemInfo() *NodeSystemInfo {
 		agents = append(agents, api.AgentRuntimeStatus{
 			AgentID: strconv.FormatUint(agentInfo.AgentID, 10),
 			Phase:   "Running",
-			Addr:    agentInfo.Addr,
+			Addr:    agentInfo.HTTPAddr,
 		})
 	}
 

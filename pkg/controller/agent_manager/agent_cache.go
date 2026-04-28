@@ -55,8 +55,15 @@ func (ac *AgentCache) GetAllAgents() []*AgentInfo {
 	agents := make([]*AgentInfo, 0, len(ac.agents))
 	for _, a := range ac.agents {
 		// 创建副本避免外部修改
-		agentCopy := *a
-		agents = append(agents, &agentCopy)
+		agentCopy := &AgentInfo{
+			AgentID:    a.AgentID,
+			Status:     a.Status,
+			NodeID:     a.NodeID,
+			NodeAddr:   a.NodeAddr,
+			MemSpaceID: a.MemSpaceID,
+			HTTPAddr:   a.HTTPAddr,
+		}
+		agents = append(agents, agentCopy)
 	}
 	return agents
 }

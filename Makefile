@@ -16,7 +16,7 @@ CONFIG_DIR := ./pkg/configs/file
 
 
 build-all: build-agent build-memspace build-agent-manager build-agent-monitor \
-           build-memspace-manager build-memspace-monitor build-demo
+           build-memspace-manager build-memspace-monitor build-demo build-cli move-cli
 	@echo "✅ All binaries built in $(BIN_DIR)/"
 	@chmod +x $(BIN_DIR)/*
 	@echo "🔒 Permissions set to executable."
@@ -56,7 +56,14 @@ build-demo:
 	@echo "🔨 Building viewspace-demo..."
 	@chmod +x $(BIN_DIR)/*
 	@go build -o $(BIN_DIR)/viewspace-demo ./cmd/viewspace_demo
-
+build-cli:
+	@echo "🔨 Building cli..."
+	@chmod +x $(BIN_DIR)/*
+	@go build -o $(BIN_DIR)/nucleus_cli ./cmd/nucleus_cli
+move-cli:
+	@sudo mv bin/nucleus_cli /usr/local/bin/
+	@export PATH=bin:$PATH
+	@nucleuscli --help
 # ============================================================
 # Run targets
 # ============================================================

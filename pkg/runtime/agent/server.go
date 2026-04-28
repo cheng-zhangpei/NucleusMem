@@ -58,13 +58,14 @@ func (s *AgentHTTPServer) handleChat(w http.ResponseWriter, r *http.Request) {
 		Type:    TaskTypeChat,
 		Content: req.Message,
 	}
-	response, err := s.agent.SubmitTask(task)
+	ID, err := s.agent.SubmitTask(task)
+	result, err := s.agent.GetTaskResult(ID, 5*time.Minute)
 	if err != nil {
-		http.Error(w, "Failed to submit task", http.StatusInternalServerError)
-		return
+		log.Errorf("Failed to get task result for task %d: %v", ID, err)
+		http.Error(w, "Failed to get task result", http.StatusInternalServerError)
 	}
 
-	resp := api.ChatResponse{Response: response, Success: true}
+	resp := api.ChatResponse{Response: result, Success: true}
 	json.NewEncoder(w).Encode(resp)
 }
 

@@ -562,3 +562,31 @@ func (c *MemSpaceClient) DeleteStandardTool(name string) error {
 	}
 	return nil
 }
+
+// GetMetadata retrieves the metadata of the MemSpace (bound agents, tools, DAG, memory count, etc.)
+func (c *MemSpaceClient) GetMetadata() (*api.MemSpaceMetadataResponse, error) {
+	req := map[string]interface{}{}
+	var resp api.MemSpaceMetadataResponse
+	err := c.post("/api/v1/memspace/metadata", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("get metadata failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get metadata failed: %s", resp.Error)
+	}
+	return &resp, nil
+}
+
+// GetAllMemoryContents returns all memory contents stored in this MemSpace
+func (c *MemSpaceClient) GetAllMemoryContents() (*api.MemSpaceMemoryContentsResponse, error) {
+	req := map[string]interface{}{}
+	var resp api.MemSpaceMemoryContentsResponse
+	err := c.post("/api/v1/memspace/memory/contents", req, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("get all memory contents failed: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("get all memory contents failed: %s", resp.Error)
+	}
+	return &resp, nil
+}

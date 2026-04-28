@@ -387,6 +387,7 @@ func (a *Agent) handleTask(task *AgentTask) error {
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
+
 	if task.ID != "" {
 		a.SetTaskResult(task.ID, result, err)
 	}
