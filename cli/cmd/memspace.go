@@ -148,7 +148,6 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 	// nucleuscli memspace agent unbind --agent-id 1
 	agentCmd.AddCommand(newMemSpaceAgentUnbindCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(agentCmd)
-
 	// 消息
 	msgCmd := &cobra.Command{
 		Use:   "message",
@@ -161,17 +160,14 @@ func NewMemSpaceCmd(memspaceClientPtr **client.MemSpaceClient) *cobra.Command {
 	// nucleuscli memspace message send --from 1 --to 2 --key "query" --content "What is the status?"
 	msgCmd.AddCommand(newMemSpaceMessageSendCmd(memspaceClientPtr))
 	memspaceCmd.AddCommand(msgCmd)
-
 	// 健康检查 & 关闭
 	// nucleuscli memspace health
 	memspaceCmd.AddCommand(newMemSpaceHealthCmd(memspaceClientPtr))
-
 	// nucleuscli memspace shutdown
 	memspaceCmd.AddCommand(newMemSpaceShutdownCmd(memspaceClientPtr))
 	// 元数据
 	// nucleuscli memspace metadata
 	memspaceCmd.AddCommand(newMemSpaceMetadataCmd(memspaceClientPtr))
-
 	// 在 memoryCmd 下增加 dump 子命令
 	// nucleuscli memspace memory dump
 	memoryCmd.AddCommand(newMemSpaceMemoryDumpCmd(memspaceClientPtr))

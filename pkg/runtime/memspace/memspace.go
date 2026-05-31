@@ -6,6 +6,7 @@ import (
 	"NucleusMem/pkg/configs"
 	memspace_region "NucleusMem/pkg/runtime/memspace/region"
 	"NucleusMem/pkg/storage"
+	bbolt_client "NucleusMem/pkg/storage/bbolt"
 	"NucleusMem/pkg/storage/tinykv-client"
 	"context"
 	"fmt"
@@ -29,34 +30,41 @@ const (
 	//MemSpaceTypeInherited MemSpaceType = "Inherited"
 )
 
-type MemSpace struct {
-	ID          string
-	Type        MemSpaceType
-	Description string
-	OwnerID     uint64 // only meaningful for private
-	summaryCnt  uint64
-
-	// New fields for background worker
-	summaryThreshold  uint64 // trigger threshold (e.g., 10 memories)
-	workerCtx         context.Context
-	workerCancel      context.CancelFunc
-	workerWG          sync.WaitGroup
-	lastSummarizedSeq uint64
-	chatServer        *client.ChatServerClient
-	MemoryRegion      *memspace_region.MemoryRegion
-	CommRegion        *memspace_region.CommRegion
-	SummaryRegion     *memspace_region.SummaryRegion
-	ToolRegion        *memspace_region.ToolRegion
-	TaskRegion        *memspace_region.TaskRegion
-	mu                sync.RWMutex
-	kvClient          *tinykv_client.MemClient
-	status            configs.MemSpaceStatus
-	boundAgents       map[uint64]*AgentBinding
-	httpAddr          string
-}
+type (
+	MemSpace struct {
+		ID          string
+		Type        MemSpaceType
+		Description string
+		OwnerID     uint64 // only meaningful for private
+		summaryCnt  uint64
+		// New fields for background worker
+		summaryThreshold  uint64 // trigger threshold (e.g., 10 memories)
+		workerCtx         context.Context
+		workerCancel      context.CancelFunc
+		workerWG          sync.WaitGroup
+		lastSummarizedSeq uint64
+		chatServer        *client.ChatServerClient
+		MemoryRegion      *memspace_region.MemoryRegion
+		CommRegion        *memspace_region.CommRegion
+		SummaryRegion     *memspace_region.SummaryRegion
+		ToolRegion        *memspace_region.ToolRegion
+		TaskRegion        *memspace_region.TaskRegion
+		mu                sync.RWMutex
+		kvClient          storage.TxnClient
+		status            configs.MemSpaceStatus
+		boundAgents       map[uint64]*AgentBinding
+		httpAddr          string
+		ifSummary         uint64
+		ifEmbedding       uint64
+	}
+)
 
 // NewMemSpace creates a new MemSpace instance from config
 func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
+	var summaryCnt uint64
+	var summaryThreshold uint64
+	var serverClient *client.EmbeddingServerClient = nil
+	var chatServerClient *client.ChatServerClient = nil
 	// Validate required fields
 	if config.MemSpaceID == 0 {
 		return nil, errors.New("memspace_id is required")
@@ -65,24 +73,30 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 		return nil, errors.New("type must be 'private' or 'public'")
 	}
 	// Set defaults
-	summaryCnt := config.SummaryCnt
-	if summaryCnt == 0 {
-		summaryCnt = 5 // default batch size
-	}
+	if config.Summary == 1 {
+		summaryCnt := config.SummaryCnt
+		if summaryCnt == 0 {
+			summaryCnt = 5 // default batch size
+		}
 
-	summaryThreshold := config.SummaryThreshold
-	if summaryThreshold == 0 {
-		summaryThreshold = 10 // default threshold
+		summaryThreshold := config.SummaryThreshold
+		if summaryThreshold == 0 {
+			summaryThreshold = 10 // default threshold
+		}
 	}
-
 	// Create clients
-	kvClient, err := tinykv_client.NewMemClient(config.PdAddr)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create TinyKV client")
+	var kvClient storage.TxnClient
+	if config.Mode == "single" {
+		kvClient, _ = bbolt_client.NewClient(config.PdAddr)
+	} else if config.Mode == "distribute" {
+		kvClient = tinykv_client.NewTinyKVTxnClient(config.PdAddr)
 	}
-
-	serverClient := client.NewEmbeddingServerClient(config.EmbeddingClientAddr)
-	chatServerClient := client.NewChatServerClient(config.LightModelAddr)
+	if config.Summary == 1 {
+		chatServerClient = client.NewChatServerClient(config.LightModelAddr)
+	}
+	if config.Embedding == 1 {
+		serverClient = client.NewEmbeddingServerClient(config.EmbeddingClientAddr)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Convert type string to enum
@@ -112,6 +126,8 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 		status:           configs.MemSpaceStatusInactive,
 		boundAgents:      make(map[uint64]*AgentBinding),
 		httpAddr:         config.HttpAddr,
+		ifEmbedding:      config.Embedding,
+		ifSummary:        config.Summary,
 	}
 
 	// Start background summary worker
@@ -122,6 +138,7 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 func (m *MemSpace) WriteMemory(memory string, agentId uint64) error {
 	// todo (cheng) check the authority
 	if memory == "" {
+		log.Warnf("memory content cannot be empty")
 		return errors.New("memory content cannot be empty")
 	}
 	return m.MemoryRegion.Write(agentId, memory)
@@ -133,26 +150,43 @@ func (m *MemSpace) WriteMemory(memory string, agentId uint64) error {
 // - n: number of similar memories to retrieve
 func (m *MemSpace) GetMemoryContext(summaryBefore int64, query string, n int) (summary string, memories []string, err error) {
 	// 1. Get latest summary before timestamp
-	summaryRecords, err := m.SummaryRegion.GetBefore(summaryBefore)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get summaries: %w", err)
-	}
+	var summaryRecords []*configs.SummaryRecord = nil
 	var latestSummary string
-	if len(summaryRecords) > 0 {
-		// Assume records are sorted by timestamp (or find max)
-		latest := summaryRecords[0]
-		for _, s := range summaryRecords {
-			if s.Timestamp > latest.Timestamp {
-				latest = s
-			}
+	if summaryBefore == 0 {
+		summaryRecords, err = m.SummaryRegion.GetBefore(summaryBefore)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to get summaries: %w", err)
 		}
-		latestSummary = latest.Content
+		if len(summaryRecords) > 0 {
+			// Assume records are sorted by timestamp (or find max)
+			latest := summaryRecords[0]
+			for _, s := range summaryRecords {
+				if s.Timestamp > latest.Timestamp {
+					latest = s
+				}
+			}
+			latestSummary = latest.Content
+		}
+	}
+	if m.ifEmbedding == 0 {
+		//
+		record, err := m.MemoryRegion.GetAll()
+		if err != nil {
+			log.Warnf("failed to get all records: %v", err)
+			return "", nil, fmt.Errorf("failed to get all records: %w", err)
+		}
+
+		for _, record := range record {
+			memories = append(memories, record.Content)
+		}
+	} else {
+		memories, err = m.MemoryRegion.Search(query, n)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to search memories: %w", err)
+		}
 	}
 	// 2. Search top-n similar memories
-	memories, err = m.MemoryRegion.Search(query, n)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to search memories: %w", err)
-	}
+
 	return latestSummary, memories, nil
 }
 

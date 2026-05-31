@@ -9,3 +9,6 @@ embedding_client_addr: "http://localhost:20002"
 light_model_addr: "http://localhost:20001"
 summary_cnt: 5
 summary_threshold: 10
+mode: "single"
+embedding: 0
+summary: 0

@@ -6,6 +6,7 @@ require (
 	github.com/pingcap-incubator/tinykv v0.0.0-20250503044459-cf7ed8da34fe
 	github.com/pkg/errors v0.8.1
 	github.com/shirou/gopsutil v2.19.10+incompatible
+	github.com/spf13/cobra v0.0.5
 	github.com/stretchr/testify v1.8.1
 	google.golang.org/grpc v1.25.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -18,7 +19,9 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.0 // indirect
+	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/spf13/pflag v1.0.3 // indirect
 	golang.org/x/net v0.0.0-20201021035429-f5854403a974 // indirect
 	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	golang.org/x/text v0.3.3 // indirect

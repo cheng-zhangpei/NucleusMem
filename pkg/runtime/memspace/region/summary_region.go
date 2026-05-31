@@ -12,37 +12,34 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	tinykv_client "NucleusMem/pkg/storage/tinykv-client"
 )
 
 const SummarySeqKey = "summary_seq"
 
-type SummaryRecord struct {
-	ID        string   `json:"id"`
-	Content   string   `json:"content"`    // compressed summary text
-	SourceIDs []string `json:"source_ids"` // original memory IDs
-	Timestamp int64    `json:"timestamp"`
-	// Metadata removed per your preference
-}
+//type configs.SummaryRecord struct {
+//	ID        string   `json:"id"`
+//	Content   string   `json:"content"`    // compressed summary text
+//	SourceIDs []string `json:"source_ids"` // original memory IDs
+//	Timestamp int64    `json:"timestamp"`
+//	// Metadata removed per your preference
+//}
 
 type SummaryRegion struct {
 	memSpaceID uint64
 	mu         sync.RWMutex
-	summaries  map[string]*SummaryRecord
-	kvClient   *tinykv_client.MemClient
+	summaries  map[string]*configs.SummaryRecord
+	kvClient   storage.TxnClient
 	seq        uint64 // sequence number for generating unique keys
 	chatClient *client.ChatServerClient
 }
 
-func NewSummaryRegion(kvClient *tinykv_client.MemClient, chatClient *client.ChatServerClient, memSpaceID uint64) *SummaryRegion {
+func NewSummaryRegion(kvClient storage.TxnClient, chatClient *client.ChatServerClient, memSpaceID uint64) *SummaryRegion {
 	sr := &SummaryRegion{
 		memSpaceID: memSpaceID,
-		summaries:  make(map[string]*SummaryRecord),
+		summaries:  make(map[string]*configs.SummaryRecord),
 		kvClient:   kvClient,
 		chatClient: chatClient,
 	}
-
 	// Load sequence number from dedicated key (O(1))
 	if seq, err := sr.loadSummarySeq(); err == nil {
 		sr.seq = seq
@@ -53,7 +50,7 @@ func NewSummaryRegion(kvClient *tinykv_client.MemClient, chatClient *client.Chat
 }
 
 // Add persists a summary record to storage and cache
-func (sr *SummaryRegion) Add(summary *SummaryRecord) error {
+func (sr *SummaryRegion) Add(summary *configs.SummaryRecord) error {
 	if summary.Timestamp == 0 {
 		summary.Timestamp = time.Now().Unix()
 	}
@@ -69,7 +66,7 @@ func (sr *SummaryRegion) Add(summary *SummaryRecord) error {
 }
 
 // Get retrieves a summary by ID (from cache or storage)
-func (sr *SummaryRegion) Get(id string) (*SummaryRecord, bool) {
+func (sr *SummaryRegion) Get(id string) (*configs.SummaryRecord, bool) {
 	// Try cache
 	sr.mu.RLock()
 	if s, ok := sr.summaries[id]; ok {
@@ -80,7 +77,7 @@ func (sr *SummaryRegion) Get(id string) (*SummaryRecord, bool) {
 
 	// Load from storage
 	rawKey := configs.EncodeKey(configs.ZoneSummary, sr.memSpaceID, []byte(id))
-	var record SummaryRecord
+	var record configs.SummaryRecord
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
 		data, err := txn.Get(rawKey)
 		if err != nil {
@@ -100,16 +97,16 @@ func (sr *SummaryRegion) Get(id string) (*SummaryRecord, bool) {
 }
 
 // GetAll loads all summaries for this MemSpace
-func (sr *SummaryRegion) GetAll() ([]*SummaryRecord, error) {
+func (sr *SummaryRegion) GetAll() ([]*configs.SummaryRecord, error) {
 	prefix := configs.GetScanPrefix(configs.ZoneSummary, sr.memSpaceID)
-	var records []*SummaryRecord
+	var records []*configs.SummaryRecord
 	err := sr.kvClient.Update(func(txn storage.Transaction) error {
 		kvPairs, err := txn.Scan(prefix)
 		if err != nil {
 			return err
 		}
 		for _, pair := range kvPairs {
-			var record SummaryRecord
+			var record configs.SummaryRecord
 			if err := json.Unmarshal(pair.Value, &record); err != nil {
 				continue
 			}
@@ -132,13 +129,13 @@ func (sr *SummaryRegion) GetAll() ([]*SummaryRecord, error) {
 }
 
 // GetBefore returns all summaries with timestamp < given timestamp
-func (sr *SummaryRegion) GetBefore(timestamp int64) ([]*SummaryRecord, error) {
+func (sr *SummaryRegion) GetBefore(timestamp int64) ([]*configs.SummaryRecord, error) {
 	all, err := sr.GetAll()
 	if err != nil {
 		return nil, err
 	}
 
-	var result []*SummaryRecord
+	var result []*configs.SummaryRecord
 	for _, s := range all {
 		if s.Timestamp < timestamp {
 			result = append(result, s)
@@ -150,11 +147,14 @@ func (sr *SummaryRegion) GetBefore(timestamp int64) ([]*SummaryRecord, error) {
 // GenerateSummary creates a compressed summary from a list of memory contents
 // For now, return a placeholder.
 // GenerateSummary creates a compressed summary from a list of memory contents
-func (sr *SummaryRegion) GenerateSummary(contents []string, sourceIDs []string) (*SummaryRecord, error) {
+func (sr *SummaryRegion) GenerateSummary(contents []string, sourceIDs []string) (*configs.SummaryRecord, error) {
+	if sr.chatClient == nil {
+		log.Warnf("no chat server client, may be the summary function did not start!")
+		return nil, fmt.Errorf("chatClient not initialized or started in the config")
+	}
 	if len(contents) == 0 {
 		return nil, fmt.Errorf("no content to summarize")
 	}
-
 	// Step 1: 拼接原始内容（限制长度）
 	const maxInputLen = 2000 // 避免超长输入
 	var inputText strings.Builder
@@ -180,7 +180,7 @@ Summary:`, inputText.String())
 	if err != nil {
 		// 如果模型失败，回退到简单拼接
 		log.Warnf("Failed to generate AI summary: %v, falling back to concatenation", err)
-		return &SummaryRecord{}, nil
+		return &configs.SummaryRecord{}, nil
 	}
 	// Step 4: 生成唯一 ID
 	sr.mu.Lock()
@@ -192,7 +192,7 @@ Summary:`, inputText.String())
 		return nil, fmt.Errorf("failed to save summary sequence: %w", err)
 	}
 
-	return &SummaryRecord{
+	return &configs.SummaryRecord{
 		ID:        key,
 		Content:   summaryText.Response,
 		SourceIDs: sourceIDs,

@@ -65,6 +65,9 @@ type MemSpaceConfig struct {
 	SummaryThreshold    uint64 `yaml:"summary_threshold"`
 	BinPath             string `yaml:"bin_path"`
 	ConfigFilePath      string `yaml:"config_file_path"`
+	Mode                string `yaml:"mode"`      //  single \ distribute
+	Embedding           uint64 `yaml:"embedding"` // 是否开启embedding
+	Summary             uint64 `yaml:"summary"`   // 是否开启摘要与压缩
 }
 
 // MemSpaceStatus represents the lifecycle state of a MemSpace
@@ -235,4 +238,19 @@ type DelegateExecutorConfig struct {
 	TaskInputField string `json:"task_input_field"` // 例如 "goal" 或 "prompt"
 	// 工作目录隔离策略
 	SandboxMode string `json:"sandbox_mode,omitempty"` // "none", "docker", "tmp_dir"
+}
+type SummaryRecord struct {
+	ID        string   `json:"id"`
+	Content   string   `json:"content"`    // compressed summary text
+	SourceIDs []string `json:"source_ids"` // original memory IDs
+	Timestamp int64    `json:"timestamp"`
+	// Metadata removed per your preference
+}
+
+type MemoryRecord struct {
+	ID        string            `json:"id"`
+	Content   string            `json:"content"`
+	Embedding []float32         `json:"embedding,omitempty"`
+	Timestamp int64             `json:"timestamp"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }

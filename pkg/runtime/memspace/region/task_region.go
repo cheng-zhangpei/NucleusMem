@@ -5,7 +5,6 @@ package memspace_region
 import (
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/storage"
-	tinykv_client "NucleusMem/pkg/storage/tinykv-client"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -70,10 +69,10 @@ type TaskRegion struct {
 	memSpaceID uint64
 	seq        uint64
 	mu         sync.RWMutex
-	kvClient   *tinykv_client.MemClient
+	kvClient   storage.TxnClient
 }
 
-func NewTaskRegion(kvClient *tinykv_client.MemClient, memSpaceID uint64) *TaskRegion {
+func NewTaskRegion(kvClient storage.TxnClient, memSpaceID uint64) *TaskRegion {
 	tr := &TaskRegion{
 		kvClient:   kvClient,
 		memSpaceID: memSpaceID,

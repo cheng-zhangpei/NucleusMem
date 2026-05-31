@@ -4,7 +4,6 @@ import (
 	"NucleusMem/pkg/client"
 	"NucleusMem/pkg/configs"
 	"NucleusMem/pkg/storage"
-	tinykv_client "NucleusMem/pkg/storage/tinykv-client"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -39,10 +38,10 @@ type CommRegion struct {
 	mu         sync.RWMutex
 	messages   []CommMessage
 	registry   map[uint64]AgentRegistryEntry
-	kvClient   *tinykv_client.MemClient
+	kvClient   storage.TxnClient
 }
 
-func NewCommRegion(kvClient *tinykv_client.MemClient, memSpaceID uint64) *CommRegion {
+func NewCommRegion(kvClient storage.TxnClient, memSpaceID uint64) *CommRegion {
 	cr := &CommRegion{
 		messages:   make([]CommMessage, 0),
 		registry:   make(map[uint64]AgentRegistryEntry),
