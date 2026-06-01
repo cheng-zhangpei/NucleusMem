@@ -12,7 +12,25 @@ const (
 	TaskTypeDecompose    = "decompose"
 	TaskTypeToolDAG      = "tool_dag" // New: For concurrent tool execution based on DAG
 	TaskTypeStandardTool = "standard_tool"
+	TaskTypeReAct        = "react"
 )
+
+// ReActStep 记录一轮推理的完整信息
+type ReActStep struct {
+	Thought     string                 `json:"thought"`
+	Action      string                 `json:"action"`
+	ActionInput map[string]interface{} `json:"action_input"`
+	Observation string                 `json:"observation"`
+}
+
+// ReActState 在迭代之间传递的状态
+type ReActState struct {
+	OriginalQuery string      `json:"original_query"`
+	Steps         []ReActStep `json:"steps"`
+	Iteration     int         `json:"iteration"`
+	MaxIterations int         `json:"max_iterations"`
+	ParentTaskID  string      `json:"parent_task_id"` // 用于 TaskResult 追踪
+}
 
 type AgentTask struct {
 	ID         string
@@ -29,6 +47,7 @@ type AgentTask struct {
 	AvailableMemTags []string         `json:"available_mem_tags,omitempty"`
 	MaxRetry         int              `json:"max_retry,omitempty"`
 	ToolGraph        *configs.ToolDAG `json:"tool_graph,omitempty"`
+	ReActState       *ReActState      `json:"react_state,omitempty"`
 }
 type TaskResult struct {
 	Result         string
