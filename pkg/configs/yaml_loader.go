@@ -87,6 +87,7 @@ func LoadAgentManagerConfigFromYAML(filePath string) (*AgentManagerConfig, error
 func LoadAgentConfigFromYAML(filePath string) (*AgentConfig, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		panic(err)
 		return nil, err
 	}
 

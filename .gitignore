@@ -1,1 +1,3 @@
 ./tmp
+chat_client_server.py
+embedding_server_client.py

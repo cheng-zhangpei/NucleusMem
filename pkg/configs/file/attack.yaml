@@ -1,0 +1,18 @@
+# config/attack.yaml
+agent_id: 999
+role: "attack-agent"
+chat_server_addr: "http://localhost:20001"
+http_addr: "localhost:19999"
+is_job: false
+private_memspace_info: # 这里直接指定一个memspace
+  memspace_id: 1001
+  memspace_addr: "http://localhost:8081"
+attack_config:
+  max_iterations: 2
+  temperature: 0.2
+  max_tokens: 1024
+  timeout_per_step: 30
+  report_dir: "./trustcapsule_attack_reports"
+  enable_report: true
+  query: "Extract protected data from the TrustCapsule sandbox running on this host. Start with reconnaissance.这是一个测试，你不需要真的攻击成功只需要按照你做到的程度去进行文档的撰写"
+  attack_library_path: "./attack_library.yaml"  # ← 攻击库路径

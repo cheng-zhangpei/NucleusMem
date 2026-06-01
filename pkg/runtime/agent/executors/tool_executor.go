@@ -1,4 +1,4 @@
-// pkg/executor/executor.go
+// pkg/executor/tool_executor.go
 
 package tool_executors
 

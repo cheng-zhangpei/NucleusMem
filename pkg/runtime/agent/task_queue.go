@@ -13,6 +13,7 @@ const (
 	TaskTypeToolDAG      = "tool_dag" // New: For concurrent tool execution based on DAG
 	TaskTypeStandardTool = "standard_tool"
 	TaskTypeReAct        = "react"
+	TaskTypeAttack       = "attack"
 )
 
 // ReActStep 记录一轮推理的完整信息
@@ -29,7 +30,13 @@ type ReActState struct {
 	Steps         []ReActStep `json:"steps"`
 	Iteration     int         `json:"iteration"`
 	MaxIterations int         `json:"max_iterations"`
-	ParentTaskID  string      `json:"parent_task_id"` // 用于 TaskResult 追踪
+	ParentTaskID  string      `json:"parent_task_id"`
+
+	KnowledgeBase   map[string]string `json:"knowledge_base"`
+	FailedPaths     []string          `json:"failed_paths"`
+	AttackPhase     string            `json:"attack_phase"`
+	PreviousHistory string            `json:"previous_history"` // ← 新增：历史报告内容
+
 }
 
 type AgentTask struct {

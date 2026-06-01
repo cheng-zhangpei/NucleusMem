@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"github.com/pingcap-incubator/tinykv/log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +42,8 @@ type Agent struct {
 	taskResultsMu     sync.RWMutex
 	toolDispatcher    *tool_executors.Dispatcher
 	standardExecutors *StandardExecutorRegistry
+	attackConfig      *configs.AttackConfig
+	attackLibrary     *configs.AttackLibrary
 }
 
 // NewAgent creates a new Agent and initializes all service clients
@@ -47,6 +51,22 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 	// tool executor dispatcher
 	dispatcher := tool_executors.NewDispatcher()
 	dispatcher.Register("http", tool_executors.NewHTTPExecutor())
+	attackCfg := config.AttackConfig
+	if attackCfg == nil {
+		attackCfg = configs.DefaultAttackConfig()
+	}
+	// 加载攻击库
+	libPath := attackCfg.AttackLibraryPath
+	if libPath == "" {
+		libPath = configs.GetDefaultAttackLibraryPath()
+	}
+	attackLib, err := configs.LoadAttackLibrary(libPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to load attack library: %v\n", err)
+	} else if attackLib != nil {
+		fmt.Printf("Loaded attack library: %s v%s (%d methods)\n",
+			attackLib.Name, attackLib.Version, len(libPath))
+	}
 
 	agent := &Agent{
 		AgentId:               config.AgentId,
@@ -61,30 +81,32 @@ func NewAgent(config *configs.AgentConfig) (*Agent, error) {
 		role:                  config.Role,
 		toolDispatcher:        dispatcher,
 		standardExecutors:     NewStandardExecutorRegistry(),
+		attackConfig:          attackCfg,
+		attackLibrary:         attackLib,
 	}
 	//agent.bindingMemspace()
 	ctx, _ := context.WithCancel(context.Background())
 	agent.taskQueue = make(chan *AgentTask, 1000)
 	agent.maxHistory = 10
 	// Connect to private MemSpace (required)
-	if !agent.isJob {
-		if config.PrivateMemSpaceInfo != nil {
-			err := agent.connectToMemSpace(config.PrivateMemSpaceInfo)
-			if err != nil {
-				return nil, fmt.Errorf("failed to connect to private memspace: %w", err)
+	if config.PrivateMemSpaceInfo != nil {
+		memClient := client.NewMemSpaceClient(config.PrivateMemSpaceInfo.MemSpaceAddr)
+		// 健康检查
+		_, err := memClient.HealthCheckWithInfo()
+		if err != nil {
+			log.Errorf("Private MemSpace health check failed: %v", err)
+		} else {
+			// 绑定
+			if err := memClient.BindAgent(config.AgentId, config.HttpAddr, config.Role); err != nil {
+				log.Errorf("Failed to bind agent to private MemSpace: %v", err)
+			} else {
+				log.Infof("Agent %d bound to private MemSpace %d at %s",
+					config.AgentId, config.PrivateMemSpaceInfo.MemSpaceId, config.PrivateMemSpaceInfo.MemSpaceAddr)
 			}
 		}
-		// Connect to public MemSpaces (optional)
-		for _, info := range config.PublicMemSpaceInfo {
-			err := agent.connectToMemSpace(info)
-			if err != nil {
-				// Log but don't fail — public spaces are optional
-				fmt.Printf("Warning: failed to connect to public memspace %d: %v\n", info.MemSpaceId, err)
-			}
-		}
-	} else {
-		// todo(cheng).. if the agent is job what should I do?
+		agent.privateMemSpaceClients = memClient
 	}
+
 	// start the task loop
 	go func() {
 		if err := agent.Start(ctx); err != nil {
@@ -375,7 +397,6 @@ func (a *Agent) handleTask(task *AgentTask) error {
 				return nil
 			}
 		}
-
 	case TaskTypeTool:
 		result, err = a.handleToolTask(task)
 	case TaskTypeDecompose:
@@ -386,6 +407,13 @@ func (a *Agent) handleTask(task *AgentTask) error {
 		result, err = a.handleStandardToolTask(task)
 	case TaskTypeReAct:
 		result, err = a.handleReActTask(task)
+	case TaskTypeAttack:
+		// Attack模式：非终止时返回空result，不设TaskResult
+		result, err = a.handleAttackReActTask(task)
+		if result == "" && err == nil {
+			// 中间步骤，不设result，下一轮会继续
+			return nil
+		}
 	default:
 		err = fmt.Errorf("unknown task type: %s", task.Type)
 	}
@@ -397,7 +425,64 @@ func (a *Agent) handleTask(task *AgentTask) error {
 		log.Errorf("Agent %d failed to handle task %s: %v", a.AgentId, task.ID, err)
 	}
 
-	return err
+	return nil
+}
+
+func (a *Agent) executeShellCommand(input map[string]interface{}) string {
+	command, _ := input["command"].(string)
+	if command == "" {
+		return "Error: 'command' parameter is required"
+	}
+
+	timeout := 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	output, err := cmd.CombinedOutput()
+
+	outputStr := string(output)
+	// 截断
+	if len(outputStr) > 4096 {
+		outputStr = outputStr[:4096] + "\n...[truncated]"
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return fmt.Sprintf("[exit_code=%d]\n%s", exitErr.ExitCode(), outputStr)
+		}
+		return fmt.Sprintf("[error=%v]\n%s", err, outputStr)
+	}
+	return fmt.Sprintf("[exit_code=0]\n%s", outputStr)
+}
+
+func (a *Agent) updateKnowledgeBase(state *ReActState, parsed ReActParsed, observation string) {
+	cmd, _ := parsed.ActionInput["command"].(string)
+	if cmd == "" {
+		return
+	}
+
+	// 记录有价值的发现
+	if !strings.Contains(observation, "Error") &&
+		!strings.Contains(observation, "No such file") &&
+		!strings.Contains(observation, "Permission denied") &&
+		len(observation) > 10 {
+		state.KnowledgeBase[cmd] = observation
+	}
+	// 记录失败路径
+	if strings.Contains(observation, "No such file") ||
+		strings.Contains(observation, "Permission denied") {
+		state.FailedPaths = append(state.FailedPaths, cmd)
+	}
+	// 自动推进攻击阶段
+	if strings.Contains(cmd, "ls") || strings.Contains(cmd, "find") || strings.Contains(cmd, "pgrep") {
+		state.AttackPhase = "recon"
+	} else if strings.Contains(cmd, "cat /tmp/tc_data") || strings.Contains(cmd, "/proc/") {
+		state.AttackPhase = "direct_read"
+	} else if strings.Contains(cmd, "dmsetup") || strings.Contains(cmd, "key") {
+		state.AttackPhase = "key_extract"
+	} else if strings.Contains(cmd, "gdb") || strings.Contains(cmd, "dump") {
+		state.AttackPhase = "memory_dump"
+	}
 }
 
 // SubmitTask submits a task and returns a taskID for tracking
@@ -1013,6 +1098,229 @@ func (a *Agent) handleDecomposeTask(task *AgentTask) (string, error) {
 
 	return string(resultJSON), nil
 }
+func (a *Agent) handleAttackReActTask(task *AgentTask) (string, error) {
+	state := task.ReActState
+	if state == nil {
+		state = &ReActState{
+			OriginalQuery: task.Content,
+			MaxIterations: a.attackConfig.MaxIterations,
+			ParentTaskID:  task.ID,
+			KnowledgeBase: make(map[string]string),
+			FailedPaths:   []string{},
+			AttackPhase:   "recon",
+		}
+		fmt.Printf("\n[ATTACK] Starting attack: %s\n", task.Content)
+		fmt.Printf("[ATTACK] Max iterations: %d\n\n", state.MaxIterations)
+		// ★ 从 MemSpace 加载历史攻击报告
+		historyContent := a.loadAttackHistory()
+		log.Infof("The len of the history is %d", len(historyContent))
+		if historyContent != "" {
+			fmt.Printf("[ATTACK] Loaded previous attack history from MemSpace\n")
+			state.PreviousHistory = historyContent
+		} else {
+			fmt.Printf("[ATTACK] No previous attack history found\n")
+		}
+	}
+
+	// ── 终止条件1：达到最大轮数 ──
+	if state.Iteration >= state.MaxIterations {
+		fmt.Printf("\n[ATTACK] Max iterations reached (%d). Generating report.\n", state.MaxIterations)
+		finalAnswer := "Max iterations reached without completing the attack."
+		if len(state.Steps) > 0 {
+			finalAnswer = state.Steps[len(state.Steps)-1].Observation
+		}
+		a.generateAndSaveReport(state, finalAnswer)
+		fmt.Printf("[ATTACK] Final Answer received. Generating report...\n")
+		report := a.BuildAttackReport(state, finalAnswer)
+		reportJSON, _ := report.Serialize()
+		memContent := "ATTACK_REPORT:" + reportJSON
+		if a.privateMemSpaceClients != nil {
+			if err := a.privateMemSpaceClients.WriteMemory(memContent, a.AgentId); err != nil {
+				fmt.Printf("[ATTACK] Failed to save report to MemSpace: %v\n", err)
+			} else {
+				fmt.Printf("[ATTACK] Report saved to MemSpace (run_id: %s)\n", report.RunID)
+			}
+		}
+		return finalAnswer, nil
+	}
+
+	// ── 构建 prompt ──
+	promptStr := buildAttackReActPrompt(
+		state.OriginalQuery,
+		state.Steps,
+		state.Iteration,
+		state.MaxIterations,
+		state.KnowledgeBase,
+		state.FailedPaths,
+		a.attackLibrary,
+		state.PreviousHistory,
+	)
+
+	fmt.Printf("[ATTACK] Step %d/%d — Calling LLM...\n", state.Iteration+1, state.MaxIterations)
+
+	// ── 调LLM，失败时把错误写入Observation继续循环 ──
+	req := client.ChatCompletionRequest{
+		Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
+		Temperature: a.attackConfig.Temperature,
+		MaxTokens:   a.attackConfig.MaxTokens,
+	}
+	resp, err := a.chatClient.ChatCompletion(req)
+	if err != nil {
+		fmt.Printf("[ATTACK] LLM call failed: %v\n", err)
+		a.injectNextStep(task, state, &ReActParsed{
+			Thought: "LLM call failed",
+			Action:  "SYSTEM_ERROR",
+		}, fmt.Sprintf("LLM call error: %v. Please retry the same command or try a different approach.", err))
+		return "", nil
+	}
+	if len(resp.Choices) == 0 {
+		fmt.Printf("[ATTACK] LLM returned empty response\n")
+		a.injectNextStep(task, state, &ReActParsed{
+			Thought: "LLM returned empty",
+			Action:  "SYSTEM_ERROR",
+		}, "LLM returned no response. Please retry.")
+		return "", nil
+	}
+	response := resp.Choices[0].Message.Content
+
+	// ── 打印原始输出 ──
+	fmt.Printf("[ATTACK] LLM Raw Response:\n---\n%s\n---\n\n", response)
+
+	// ── 解析 ──
+	parsed := parseAttackReActResponse(response)
+	fmt.Printf("[ATTACK] Parsed:\n")
+	fmt.Printf("  Thought:       %s\n", truncate(parsed.Thought, 200))
+	fmt.Printf("  Action:        %s\n", parsed.Action)
+	fmt.Printf("  ActionInput:   %v\n", parsed.ActionInput)
+	fmt.Printf("  IsFinalAnswer: %v\n\n", parsed.IsFinalAnswer)
+
+	// ── 终止条件2：有效FinalAnswer ──
+	if parsed.IsFinalAnswer && parsed.FinalAnswer != "" {
+		fmt.Printf("[ATTACK] Final Answer received. Generating report...\n")
+		a.generateAndSaveReport(state, parsed.FinalAnswer)
+		report := a.BuildAttackReport(state, parsed.FinalAnswer)
+		reportJSON, _ := report.Serialize()
+		memContent := "ATTACK_REPORT:" + reportJSON
+		if a.privateMemSpaceClients != nil {
+			if err := a.privateMemSpaceClients.WriteMemory(memContent, a.AgentId); err != nil {
+				fmt.Printf("[ATTACK] Failed to save report to MemSpace: %v\n", err)
+			} else {
+				fmt.Printf("[ATTACK] Report saved to MemSpace (run_id: %s)\n", report.RunID)
+			}
+		}
+
+		return parsed.FinalAnswer, nil
+	}
+
+	// ── 解析失败：把错误注入Observation，继续循环 ──
+	if parsed.Action == "" {
+		fmt.Printf("[ATTACK] Parse failed: no valid Action found. Injecting retry hint.\n")
+		a.injectNextStep(task, state, &ReActParsed{
+			Thought: parsed.Thought,
+			Action:  "PARSE_ERROR",
+		}, "Your response did not contain a valid Action. Please respond in this exact format:\nThought: <reasoning>\nAction: exec_cmd\nAction Input: {\"command\": \"your_shell_command\"}")
+		return "", nil
+	}
+
+	// ── 执行 Action ──
+	var observation string
+	switch parsed.Action {
+	case "exec_cmd":
+		observation = a.executeShellCommandWithTimeout(parsed.ActionInput, a.attackConfig.TimeoutPerStep)
+	case "chat":
+		query, _ := parsed.ActionInput["query"].(string)
+		chatResp, chatErr := a.chatClient.QuickChat(query)
+		if chatErr != nil {
+			observation = fmt.Sprintf("Chat error: %v", chatErr)
+		} else {
+			observation = chatResp.Response
+		}
+	default:
+		observation = fmt.Sprintf("Unknown action: %s. Use exec_cmd or chat.", parsed.Action)
+	}
+
+	fmt.Printf("[ATTACK] Observation:\n---\n%s\n---\n\n", truncate(observation, 500))
+
+	// ── 更新知识图谱 ──
+	a.updateKnowledgeBase(state, parsed, observation)
+
+	// ── 注入下一步 ──
+	a.injectNextStep(task, state, &parsed, observation)
+	fmt.Printf("[ATTACK] Step %d complete. Proceeding to step %d.\n\n", state.Iteration, state.Iteration+1)
+
+	return "", nil
+}
+
+// 注入下一步task，统一处理所有"非终止"情况
+func (a *Agent) injectNextStep(task *AgentTask, state *ReActState, parsed *ReActParsed, observation string) {
+	step := ReActStep{
+		Thought:     parsed.Thought,
+		Action:      parsed.Action,
+		ActionInput: parsed.ActionInput,
+		Observation: observation,
+	}
+	state.Steps = append(state.Steps, step)
+	state.Iteration++
+
+	nextTask := &AgentTask{
+		ID:         task.ID,
+		Type:       TaskTypeAttack,
+		Content:    state.OriginalQuery,
+		ReActState: state,
+		Timestamp:  time.Now().Unix(),
+	}
+	select {
+	case a.taskQueue <- nextTask:
+		log.Infof("Agent %d attack step %d done, next round", a.AgentId, state.Iteration)
+	default:
+		fmt.Printf("[ATTACK] ERROR: task queue full at iteration %d\n", state.Iteration)
+	}
+}
+
+// 生成报告并保存
+func (a *Agent) generateAndSaveReport(state *ReActState, finalAnswer string) {
+	if !a.attackConfig.EnableReport {
+		return
+	}
+	report := a.generateAttackReport(state, finalAnswer)
+	reportDir := a.attackConfig.ReportDir
+	os.MkdirAll(reportDir, 0755)
+	reportPath := fmt.Sprintf("%s/report_%s.md", reportDir, time.Now().Format("20060102_150405"))
+	if err := os.WriteFile(reportPath, []byte(report), 0644); err != nil {
+		fmt.Printf("[ATTACK] Failed to write report: %v\n", err)
+	} else {
+		fmt.Printf("[ATTACK] Report saved: %s\n", reportPath)
+	}
+}
+
+func (a *Agent) executeShellCommandWithTimeout(input map[string]interface{}, timeoutSec int) string {
+	command, _ := input["command"].(string)
+	if command == "" {
+		return "Error: 'command' parameter is required"
+	}
+
+	timeout := time.Duration(timeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	output, err := cmd.CombinedOutput()
+
+	outputStr := string(output)
+	if len(outputStr) > 4096 {
+		outputStr = outputStr[:4096] + "\n...[truncated]"
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return fmt.Sprintf("[exit_code=%d]\n%s", exitErr.ExitCode(), outputStr)
+		}
+		return fmt.Sprintf("[error=%v]\n%s", err, outputStr)
+	}
+	return fmt.Sprintf("[exit_code=0]\n%s", outputStr)
+}
 
 // collectAvailableToolNames gathers tool names from all bound MemSpaces
 func (a *Agent) collectAvailableToolNames() []string {
@@ -1309,6 +1617,7 @@ func (a *Agent) handleReActTask(task *AgentTask) (string, error) {
 		state.Steps,
 		state.Iteration,
 		state.MaxIterations,
+		a.attackLibrary,
 	)
 
 	// =========================================
@@ -1331,7 +1640,7 @@ func (a *Agent) handleReActTask(task *AgentTask) (string, error) {
 	// =========================================
 	// 4. 解析 LLM 输出：Final Answer 还是 Action？
 	// =========================================
-	parsed := parseReActResponse(response)
+	parsed := parseAttackReActResponse(response)
 
 	if parsed.IsFinalAnswer || state.Iteration >= state.MaxIterations {
 		// 到达最终答案或超过迭代上限
@@ -1442,4 +1751,322 @@ func (a *Agent) findToolByName(name string) *configs.ToolDefinition {
 		}
 	}
 	return nil
+}
+func (a *Agent) generateAttackReport(state *ReActState, finalAnswer string) string {
+	var b strings.Builder
+	b.WriteString("You are a security analyst. Generate a professional penetration test report in Markdown.\n\n")
+
+	b.WriteString("## Context\n")
+	b.WriteString("- Target: TrustCapsule sandbox (bwrap-based isolation)\n")
+	b.WriteString("- Attacker: Host root user\n")
+	b.WriteString(fmt.Sprintf("- Total steps: %d\n\n", state.Iteration))
+
+	b.WriteString("## Attack Timeline\n")
+	for i, s := range state.Steps {
+		b.WriteString(fmt.Sprintf("### Step %d\n", i+1))
+		b.WriteString(fmt.Sprintf("- Thought: %s\n", s.Thought))
+		cmd, _ := s.ActionInput["command"].(string)
+		if cmd != "" {
+			b.WriteString(fmt.Sprintf("- Command: `%s`\n", cmd))
+		}
+		obs := s.Observation
+		if len(obs) > 500 {
+			obs = obs[:500] + "..."
+		}
+		b.WriteString(fmt.Sprintf("- Result: %s\n\n", obs))
+	}
+
+	if len(state.KnowledgeBase) > 0 {
+		b.WriteString("## Key Findings\n")
+		for k, v := range state.KnowledgeBase {
+			val := v
+			if len(val) > 300 {
+				val = val[:300] + "..."
+			}
+			b.WriteString(fmt.Sprintf("- `%s`: %s\n", k, val))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(state.FailedPaths) > 0 {
+		b.WriteString("## Blocked Paths\n")
+		for _, p := range state.FailedPaths {
+			b.WriteString(fmt.Sprintf("- `%s`\n", p))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("## Conclusion\n")
+	b.WriteString(finalAnswer)
+	b.WriteString("\n\n")
+
+	b.WriteString("Generate a Markdown report with these sections:\n")
+	b.WriteString("1. Executive Summary\n2. Target Environment\n3. Attack Methodology\n4. Critical Findings (with severity)\n5. Evidence\n6. Recommendations\n7. Conclusion\n")
+	b.WriteString("Output ONLY the Markdown.\n")
+
+	promptStr := b.String()
+
+	req := client.ChatCompletionRequest{
+		Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
+		Temperature: 0.3,
+		MaxTokens:   4096,
+	}
+	resp, err := a.chatClient.ChatCompletion(req)
+	if err != nil {
+		fmt.Printf("[ATTACK] Report generation via LLM failed: %v. Using fallback.\n", err)
+		return generateFallbackReport(state, finalAnswer)
+	}
+	if len(resp.Choices) == 0 {
+		return generateFallbackReport(state, finalAnswer)
+	}
+
+	return resp.Choices[0].Message.Content
+}
+
+func generateFallbackReport(state *ReActState, finalAnswer string) string {
+	var b strings.Builder
+	b.WriteString("# TrustCapsule Sandbox Penetration Test Report\n\n")
+	b.WriteString(fmt.Sprintf("- **Date**: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("- **Total Steps**: %d\n", state.Iteration))
+	b.WriteString(fmt.Sprintf("- **Attack Phase**: %s\n\n", state.AttackPhase))
+
+	b.WriteString("## Attack Steps\n\n")
+	for i, s := range state.Steps {
+		b.WriteString(fmt.Sprintf("### Step %d\n", i+1))
+		cmd, _ := s.ActionInput["command"].(string)
+		b.WriteString(fmt.Sprintf("Command: `%s`\n", cmd))
+		b.WriteString(fmt.Sprintf("Result: %s\n\n", s.Observation))
+	}
+
+	b.WriteString("## Conclusion\n\n")
+	b.WriteString(finalAnswer)
+	b.WriteString("\n")
+	return b.String()
+}
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+func (a *Agent) BuildAttackReport(state *ReActState, finalAnswer string) *AttackReport {
+	report := &AttackReport{
+		RunID:        fmt.Sprintf("run_%s", time.Now().Format("20060102_150405")),
+		Timestamp:    time.Now(),
+		Query:        state.OriginalQuery,
+		TotalSteps:   state.Iteration,
+		Findings:     []AttackFinding{},
+		DeniedPaths:  []DeniedPath{},
+		PendingTasks: []string{},
+	}
+
+	// 从知识图谱提取发现
+	findingID := 0
+	for cmd, output := range state.KnowledgeBase {
+		finding := AttackFinding{
+			ID:          fmt.Sprintf("f_%d", findingID),
+			Category:    categorizeCommand(cmd),
+			Title:       extractTitle(cmd),
+			Description: truncate(output, 300),
+			Evidence:    truncate(output, 500),
+			Severity:    estimateSeverity(cmd, output),
+			Exploitable: estimateExploitable(cmd, output),
+			ExploitHint: estimateExploitHint(cmd, output),
+		}
+		report.Findings = append(report.Findings, finding)
+		findingID++
+	}
+
+	// 从步骤中提取Kernel和Sandbox信息
+	for _, step := range state.Steps {
+		cmd, _ := step.ActionInput["command"].(string)
+		if strings.Contains(cmd, "uname") || strings.Contains(cmd, "/proc/version") {
+			report.KernelInfo = truncate(step.Observation, 100)
+		}
+		if strings.Contains(cmd, "pgrep") || strings.Contains(cmd, "bwrap") {
+			report.SandboxInfo = truncate(step.Observation, 200)
+		}
+	}
+
+	// 失败路径
+	for _, path := range state.FailedPaths {
+		denied := DeniedPath{
+			Command: path,
+			Reason:  guessDenialReason(path, state),
+			Times:   1,
+		}
+		// 去重统计
+		found := false
+		for i, d := range report.DeniedPaths {
+			if d.Command == path {
+				report.DeniedPaths[i].Times++
+				found = true
+				break
+			}
+		}
+		if !found {
+			report.DeniedPaths = append(report.DeniedPaths, denied)
+		}
+	}
+
+	// 评估成功等级
+	report.SuccessLevel = evaluateSuccessLevel(state, finalAnswer)
+	report.Conclusion = truncate(finalAnswer, 500)
+	report.NextSuggestion = generateNextSuggestion(state, finalAnswer)
+
+	return report
+}
+
+// SaveAttackReport 存入MemSpace
+func (a *Agent) SaveAttackReport(report *AttackReport) error {
+	data, err := report.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize report: %w", err)
+	}
+
+	// 存入private MemSpace（如果有）
+	if a.privateMemSpaceClients != nil {
+		key := fmt.Sprintf("attack_report/%s", report.RunID)
+		if err := a.privateMemSpaceClients.WriteMemory(data, a.AgentId); err != nil {
+			fmt.Printf("[ATTACK] Failed to save report to MemSpace: %v\n", err)
+		} else {
+			fmt.Printf("[ATTACK] Report saved to MemSpace: %s\n", key)
+		}
+	}
+
+	// 同时存本地文件（双保险）
+	reportDir := a.attackConfig.ReportDir
+	os.MkdirAll(reportDir, 0755)
+	reportPath := fmt.Sprintf("%s/report_%s.json", reportDir, report.RunID)
+	os.WriteFile(reportPath, []byte(data), 0644)
+
+	return nil
+}
+
+// LoadPreviousReports 从MemSpace加载历史报告
+func (a *Agent) LoadPreviousReports(limit int) ([]*AttackReport, error) {
+	var reports []*AttackReport
+
+	// 优先从MemSpace读
+	if a.privateMemSpaceClients != nil {
+		// 这里需要MemSpaceClient支持ListByPrefix
+		// 如果不支持，从本地文件兜底
+	}
+
+	// 从本地文件兜底
+	reportDir := a.attackConfig.ReportDir
+	entries, err := os.ReadDir(reportDir)
+	if err != nil {
+		return nil, nil
+	}
+
+	// 按时间倒序，取最近limit个
+	jsonFiles := []string{}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") && strings.HasPrefix(entry.Name(), "report_") {
+			jsonFiles = append(jsonFiles, entry.Name())
+		}
+	}
+	// 倒序
+	for i, j := 0, len(jsonFiles)-1; i < j; i, j = i+1, j-1 {
+		jsonFiles[i], jsonFiles[j] = jsonFiles[j], jsonFiles[i]
+	}
+
+	count := 0
+	for _, filename := range jsonFiles {
+		if count >= limit {
+			break
+		}
+		path := filepath.Join(reportDir, filename)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		report, err := DeserializeReport(string(data))
+		if err != nil {
+			continue
+		}
+		reports = append(reports, report)
+		count++
+	}
+
+	return reports, nil
+}
+
+// FormatPreviousReportsForPrompt 格式化历史报告注入prompt
+func (a *Agent) FormatPreviousReportsForPrompt() string {
+	reports, err := a.LoadPreviousReports(3) // 只取最近3次
+	if err != nil || len(reports) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Previous Attack Runs (Learn from these)\n")
+	b.WriteString("These are results from previous attack sessions. DO NOT repeat completed work.\n\n")
+
+	for _, r := range reports {
+		b.WriteString(r.FormatForNextRun())
+	}
+
+	return b.String()
+}
+func (a *Agent) loadAttackHistory() string {
+	if a.privateMemSpaceClients == nil {
+		log.Warnf("the private memspace client is nil!")
+		return ""
+	}
+
+	contents, err := a.privateMemSpaceClients.GetAllMemoryContents()
+	if err != nil {
+		log.Infof("[ATTACK] Failed to load history from MemSpace: %v\n", err)
+		return ""
+	}
+
+	if contents == nil || len(contents.Contents) == 0 {
+		log.Warnf("the content in the memspace is empty!")
+		return ""
+	}
+
+	// 筛选出攻击报告（以 "ATTACK_REPORT:" 开头的记忆条目）
+	var reports []string
+	for _, mem := range contents.Contents {
+		if strings.HasPrefix(mem, "ATTACK_REPORT:") {
+			reportJSON := strings.TrimPrefix(mem, "ATTACK_REPORT:")
+			report := parseStoredReport(reportJSON)
+			if report != "" {
+				reports = append(reports, report)
+			}
+		}
+	}
+
+	if len(reports) == 0 {
+		return ""
+	}
+
+	// 只取最近3条
+	if len(reports) > 3 {
+		reports = reports[len(reports)-3:]
+	}
+
+	var b strings.Builder
+	b.WriteString("## Previous Attack Runs (Learn from these)\n")
+	b.WriteString("These are results from previous attack sessions. DO NOT repeat completed work.\n\n")
+	for _, r := range reports {
+		b.WriteString(r)
+	}
+
+	return b.String()
+}
+
+// 解析存储的报告JSON，返回格式化的prompt内容
+func parseStoredReport(jsonStr string) string {
+	report, err := DeserializeReport(jsonStr)
+	if err != nil {
+		// 如果解析失败，直接截取前500字符作为摘要
+		if len(jsonStr) > 500 {
+			return jsonStr[:500] + "...\n\n"
+		}
+		return jsonStr + "\n\n"
+	}
+	return report.FormatForNextRun()
 }

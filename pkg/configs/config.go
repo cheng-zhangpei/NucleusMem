@@ -1,6 +1,6 @@
 package configs
 
-// pkg/configs/agent_config.go
+// AgentConfig pkg/configs/agent_config.go
 type AgentConfig struct {
 	AgentId             uint64          `yaml:"agent_id"`
 	AgentManagerAddr    string          `yaml:"agent_manager_addr"`
@@ -15,6 +15,33 @@ type AgentConfig struct {
 	IsJob               bool            `yaml:"is_job"`
 	HttpAddr            string          `yaml:"http_addr"`
 	role                string          `yaml:"role"`
+	AttackConfig        *AttackConfig   `yaml:"attack_config,omitempty" json:"attack_config,omitempty"`
+}
+
+// pkg/configs/config.go 里更新AttackConfig
+
+type AttackConfig struct {
+	MaxIterations     int     `yaml:"max_iterations" json:"max_iterations"`
+	Temperature       float64 `yaml:"temperature" json:"temperature"`
+	MaxTokens         int     `yaml:"max_tokens" json:"max_tokens"`
+	TimeoutPerStep    int     `yaml:"timeout_per_step" json:"timeout_per_step"`
+	ReportDir         string  `yaml:"report_dir" json:"report_dir"`
+	Query             string  `yaml:"query" json:"query"`
+	EnableReport      bool    `yaml:"enable_report" json:"enable_report"`
+	AttackLibraryPath string  `yaml:"attack_library_path" json:"attack_library_path"` // 攻击库文件路径
+}
+
+func DefaultAttackConfig() *AttackConfig {
+	return &AttackConfig{
+		MaxIterations:     25,
+		Temperature:       0.2,
+		MaxTokens:         1024,
+		TimeoutPerStep:    30,
+		ReportDir:         "./trustcapsule_attack_reports",
+		Query:             "Extract protected data from the TrustCapsule sandbox running on this host. Start with reconnaissance.",
+		EnableReport:      true,
+		AttackLibraryPath: "", // 空表示不加载
+	}
 }
 
 type MemSpaceInfo struct {

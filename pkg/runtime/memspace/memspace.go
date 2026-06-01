@@ -137,6 +137,7 @@ func NewMemSpace(config *configs.MemSpaceConfig) (*MemSpace, error) {
 }
 func (m *MemSpace) WriteMemory(memory string, agentId uint64) error {
 	// todo (cheng) check the authority
+	//log.Infof("write content %s", memory[0:20])
 	if memory == "" {
 		log.Warnf("memory content cannot be empty")
 		return errors.New("memory content cannot be empty")
@@ -290,12 +291,16 @@ func (m *MemSpace) BindAgent(agentID uint64, addr, role string) error {
 
 	// 1. 检查是否已绑定
 	if _, exists := m.boundAgents[agentID]; exists {
+		log.Warnf("MemSpace %s already bound to agent %d", m.ID, agentID)
 		return fmt.Errorf("agent %d already bound to memspace %s", agentID, m.ID)
 	}
 	// 2. 权限控制：根据 MemSpace 类型判断是否允许绑定
 	if m.Type == MemSpaceTypePrivate {
 		// Private MemSpace 只能绑定 OwnerID 对应的 Agent
 		if agentID != m.OwnerID {
+			log.Warnf("private memspace %s can only be bound by owner (agent %d), got agent %d",
+				m.ID, m.OwnerID, agentID)
+
 			return fmt.Errorf("private memspace %s can only be bound by owner (agent %d), got agent %d",
 				m.ID, m.OwnerID, agentID)
 		}

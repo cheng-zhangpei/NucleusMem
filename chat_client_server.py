@@ -17,10 +17,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# === 阿里云 Qwen 配置 ===
-MODEL_NAME = "qwen-plus"
-API_KEY = "sk-2b3e4f939b734798977081f73b83ad2f"  # 写死（不上传仓库）
-BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+MODEL_NAME = "mimo-v2.5"
+API_KEY = "tp-cd5b6mwd7id3a16xr9z853nc855igtrqbvcksufdijo618zu"  # 写死（不上传仓库）
+BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 
 # 初始化 OpenAI 兼容客户端
 client = OpenAI(
@@ -195,7 +194,7 @@ def quick_chat():
 
 
 if __name__ == '__main__':
-    logger.info("Starting Qwen Chat Server with Replay Tolerance (max 10)")
+    logger.info("Starting Chat Server with Replay Tolerance (max 10)")
     logger.info(f"   Model: {MODEL_NAME}")
     logger.info(f"   Base URL: {BASE_URL}")
     app.config['TIMEOUT'] = 300

