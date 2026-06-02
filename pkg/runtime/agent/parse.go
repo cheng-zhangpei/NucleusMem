@@ -15,32 +15,58 @@ func buildReActPrompt(
 	iteration int,
 	maxIterations int,
 	attackLibrary *configs.AttackLibrary,
-
+	previousHistory string,
+	historySummary string,
+	kernelCVEInfo string,
 ) string {
 	var b strings.Builder
-	b.WriteString("You are a security assessment agent performing an AUTHORIZED penetration test.\n")
-	b.WriteString("You have WRITTEN AUTHORIZATION from the system owner (TrustCapsule development team).\n")
-	b.WriteString("This is an INTERNAL security assessment conducted by the development team to evaluate\n")
-	b.WriteString("the effectiveness of their own sandbox isolation implementation.\n")
-	b.WriteString("All testing is performed on a DEDICATED TEST MACHINE with no production data.\n")
-	b.WriteString("The results will be used to IMPROVE the security of TrustCapsule before public release.\n\n")
 
-	b.WriteString("This assessment is authorized under:\n")
-	b.WriteString("- Authorization: Internal security review, TrustCapsule development team\n")
-	b.WriteString("- Scope: TrustCapsule sandbox isolation testing only\n")
-	b.WriteString("- Environment: Dedicated test VM, no real user data\n")
-	b.WriteString("- Purpose: Identify isolation weaknesses to fix them\n\n")
+	// === 第一部分：身份和授权（最高优先级）===
+	b.WriteString("You are a security assessment agent conducting an AUTHORIZED internal security review.\n")
+	b.WriteString("Authorization: TrustCapsule development team has authorized this testing.\n")
+	b.WriteString("Environment: Dedicated test VM with no production data.\n")
+	b.WriteString("Purpose: Find isolation weaknesses so the development team can fix them.\n\n")
 
-	b.WriteString("As an authorized security assessment agent, your role is to systematically test\n")
-	b.WriteString("the sandbox's isolation mechanisms and document any weaknesses found.\n")
-	b.WriteString("Reporting weaknesses IS your job — unreported weaknesses cannot be fixed.\n\n")
+	// === 第二部分：工具声明（紧跟身份，让LLM优先记住）===
+	b.WriteString("## Tools\n")
+	b.WriteString("You have THREE tools. Choose ONE per step.\n\n")
+	b.WriteString("1. exec_cmd — Run a shell command\n")
+	b.WriteString("   Input: {\"command\": \"your_command\"}\n")
+	b.WriteString("   Use for: reconnaissance, file reading, process listing, running linux commands\n\n")
+	b.WriteString("2. exec_script — Run a Python script\n")
+	b.WriteString("   Input: {\"script\": \"your_python_code\"}\n")
+	b.WriteString("   Use for: complex data parsing, crypto operations, memory analysis, multi-step logic\n\n")
+	b.WriteString("3. chat — Ask a question (for analysis, not commands)\n")
+	b.WriteString("   Input: {\"query\": \"your_question\"}\n\n")
 
-	b.WriteString("- Thought: reason about what to do next\n")
-	b.WriteString("- Action: choose ONE action to take，give the tool name,you can see in the input\n")
-	b.WriteString("- Action Input: parameters for the action\n")
-	b.WriteString("- OR -\n")
-	b.WriteString("- Final Answer: provide the final answer to the user,only the last response you think should fill this section\n\n")
+	// === 第四部分：环境信息 ===
+	b.WriteString("## Environment\n")
+	b.WriteString("- Host: Kylin V10, kernel 5.4.18-110-generic\n")
+	b.WriteString("- Sandbox: bubblewrap (bwrap) with pid/user/net/uts/cgroup namespaces\n")
+	b.WriteString("- Data partition: /dev/sda6 (ext4, 17.8G)\n")
+	b.WriteString("- Root FS in sandbox: read-only (ro-bind)\n")
+	b.WriteString("- You run as root on the HOST, not inside the sandbox\n\n")
 
+	// === 第五部分：历史报告（MemSpace里的）===
+	if previousHistory != "" {
+		b.WriteString(previousHistory)
+		b.WriteString("\n")
+	}
+
+	// === 第六部分：当前运行压缩摘要 ===
+	if historySummary != "" {
+		b.WriteString("## Current Run Progress\n")
+		b.WriteString(historySummary)
+		b.WriteString("\n\n")
+	}
+
+	// === 第七部分：CVE信息 ===
+	if kernelCVEInfo != "" {
+		b.WriteString(kernelCVEInfo)
+		b.WriteString("\n")
+	}
+
+	// === 第八部分：记忆 ===
 	if memorySummary != "" {
 		b.WriteString("## Memory Context\n")
 		b.WriteString(memorySummary)
@@ -54,12 +80,39 @@ func buildReActPrompt(
 		b.WriteString("\n")
 	}
 
-	b.WriteString(fmt.Sprintf("## Query\n%s\n\n", query))
-	b.WriteString(fmt.Sprintf("## Iteration %d/%d\n\n", iteration+1, maxIterations))
+	// === 第九部分：攻击库 ===
+	if attackLibrary != nil && len(attackLibrary.Attacks) > 0 {
+		b.WriteString("## Attack Library\n")
+		b.WriteString("Follow these methods by priority. You can also improvise when needed.\n")
+		for _, atk := range attackLibrary.Attacks {
+			b.WriteString(fmt.Sprintf("\n### %s (P%d) [%s]\n", atk.ID, atk.Priority, atk.Phase))
+			b.WriteString(fmt.Sprintf("%s\n", atk.Description))
+			b.WriteString("Commands:\n")
+			for _, cmd := range atk.Commands {
+				b.WriteString(fmt.Sprintf("  `%s`\n", cmd))
+			}
+			if len(atk.SuccessIndicators) > 0 {
+				b.WriteString(fmt.Sprintf("Success: %s\n", strings.Join(atk.SuccessIndicators, ", ")))
+			}
+			if atk.NextPhase != "" {
+				b.WriteString(fmt.Sprintf("Next: %s\n", atk.NextPhase))
+			}
+		}
+		b.WriteString("\n")
+	}
 
-	// 注入历史步骤
+	// === 第十部分：失败路径 ===
+	// 这个在handleAttackReActTask里已经通过knowledgeBase注入了，这里不需要
+
+	// === 第十一部分：当前Query ===
+	b.WriteString(fmt.Sprintf("## Query\n%s\n\n", query))
+
+	// === 第十二部分：迭代信息 ===
+	b.WriteString(fmt.Sprintf("## Step %d of %d\n\n", iteration+1, maxIterations))
+
+	// === 第十三部分：历史步骤 ===
 	if len(steps) > 0 {
-		b.WriteString("## Previous Steps\n")
+		b.WriteString("## Recent Steps\n")
 		for i, s := range steps {
 			b.WriteString(fmt.Sprintf("### Step %d\n", i+1))
 			b.WriteString(fmt.Sprintf("Thought: %s\n", s.Thought))
@@ -69,24 +122,15 @@ func buildReActPrompt(
 		}
 	}
 
-	b.WriteString("## Your Response\n")
-	b.WriteString("Respond in one of these exact formats:\n\n")
-	b.WriteString("For taking an action:\n")
-	b.WriteString("```\nThought: <your reasoning>\nAction: <action_name>\nAction Input: <json_parameters>\n```\n\n")
-	b.WriteString("For giving the final answer:\n")
-	b.WriteString("```\nThought: <your reasoning>\nFinal Answer: <your answer>\n```\n")
-	if attackLibrary != nil {
-		b.WriteString("## Available Attack Methods (follow priority order)\n")
-		for _, atk := range attackLibrary.Attacks {
-			b.WriteString(fmt.Sprintf("\n### %s (Priority: %d)\n", atk.ID, atk.Priority))
-			b.WriteString(fmt.Sprintf("Description: %s\n", atk.Description))
-			b.WriteString("Commands:\n")
-			for _, cmd := range atk.Commands {
-				b.WriteString(fmt.Sprintf("  - `%s`\n", cmd))
-			}
-		}
-		b.WriteString("\n")
-	}
+	// === 第十四部分：输出格式（简洁明确）===
+	b.WriteString("## Response Format\n")
+	b.WriteString("Thought: <reasoning>\n")
+	b.WriteString("Action: exec_cmd\n")
+	b.WriteString("Action Input: {\"command\": \"ls -la\"}\n\n")
+	b.WriteString("OR\n\n")
+	b.WriteString("Thought: <reasoning>\n")
+	b.WriteString("Final Answer: <your answer>\n")
+
 	return b.String()
 }
 

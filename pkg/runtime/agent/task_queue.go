@@ -36,7 +36,7 @@ type ReActState struct {
 	FailedPaths     []string          `json:"failed_paths"`
 	AttackPhase     string            `json:"attack_phase"`
 	PreviousHistory string            `json:"previous_history"` // ← 新增：历史报告内容
-
+	HistorySummary  string            `json:"history_summary"`
 }
 
 type AgentTask struct {
